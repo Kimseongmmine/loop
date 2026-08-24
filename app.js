@@ -37,6 +37,21 @@ function mostRecentBefore(days, date) {
   return past[0] || null;
 }
 
+// ---- suggestions (pre-fill so the box is never blank; deterministic per date) ----
+const PRESETS = [
+  "자격증 인강 1강 듣고 필기",
+  "포트폴리오 기능 1개 만들기",
+  "전공서 10페이지 읽고 요약 1장",
+  "지원할 인턴·대외활동 3개 찾아 저장",
+  "어제 만든 것 이어서 정리"
+];
+
+function suggestionFor(dateString) {
+  const parts = dateString.split("-").map(Number);
+  const key = parts[0] * 372 + parts[1] * 31 + parts[2]; // stable per calendar day
+  return PRESETS[key % PRESETS.length];
+}
+
 // ---- date helpers (local time; accept `now` for testability) ----
 function pad2(n) { return n < 10 ? "0" + n : "" + n; }
 
@@ -151,7 +166,7 @@ function renderNight(root) {
   if (view.confirmed) {
     renderNightConfirmed(root, view);
   } else {
-    renderNightInput(root, view.target, "");
+    renderNightInput(root, view.target, suggestionFor(view.target));
   }
 }
 
@@ -235,6 +250,7 @@ function renderMorning(root) {
     const input = el("input", { cls: "input" });
     input.type = "text";
     input.placeholder = "오늘 오전: ____ 60분";
+    input.value = suggestionFor(today);
     input.autofocus = true;
     const btn = el("button", { text: "확정", cls: "confirm" });
     function submit() {

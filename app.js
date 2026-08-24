@@ -52,6 +52,90 @@ function suggestionFor(dateString) {
   return PRESETS[key % PRESETS.length];
 }
 
+// ---- AI suggestion via OpenRouter (optional; falls back to presets) ----
+const OR_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
+const OR_DEFAULT_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
+const OR_KEY = "loop.or_key";
+const OR_MODEL = "loop.or_model";
+
+function getKey() { try { return localStorage.getItem(OR_KEY) || ""; } catch (e) { return ""; } }
+function setKey(k) { try { localStorage.setItem(OR_KEY, k); } catch (e) {} }
+function getModel() { try { return localStorage.getItem(OR_MODEL) || OR_DEFAULT_MODEL; } catch (e) { return OR_DEFAULT_MODEL; } }
+
+const AI_SYSTEM = [
+  "너는 대학 3학년 남학생의 하루 계획을 짜주는 코치다.",
+  "이 사람은 스스로 시작·지속하는 힘이 약해서, 아침에 '뭘 할지 고르는 것' 자체를 못한다.",
+  "그래서 너가 오늘 아침에 할 '단 하나'를 대신 정해준다.",
+  "목표: 자격증 1개 취득, 자기 이름 붙은 결과물 1개, 실무 경험, 전공서 읽기.",
+  "규칙: 딱 60분 분량. 아침에 혼자 할 수 있는 것. 작고 구체적. 몰아치기 금지.",
+  "최근에 완료한 것과 비슷하면 다음 단계로, 계속 미룬 것이면 더 잘게 쪼개서 제안.",
+  "출력은 한국어 한 줄, 25자 이내, 할 일만. 따옴표·설명·이모지·번호 금지."
+].join(" ");
+
+function buildUserPrompt(dateString, days) {
+  const wd = ["일", "월", "화", "수", "목", "금", "토"];
+  const parts = dateString.split("-").map(Number);
+  const dow = wd[new Date(parts[0], parts[1] - 1, parts[2]).getDay()];
+  const recent = days
+    .filter(function (d) { return d.date < dateString; })
+    .sort(function (a, b) { return a.date < b.date ? 1 : -1; })
+    .slice(0, 7)
+    .map(function (d) { return d.date + " " + (d.completed ? "완료" : "미완료") + ": " + d.task; });
+  return "오늘은 " + dateString + " (" + dow + "요일).\n" +
+    (recent.length ? "최근 기록:\n" + recent.join("\n") : "기록 없음(첫날).") +
+    "\n오늘 오전에 할 단 하나를 정해줘.";
+}
+
+function cleanLine(text) {
+  let s = String(text).split("\n").find(function (l) { return l.trim(); }) || "";
+  s = s.trim().replace(/^["'`\-•\d.\)\s]+/, "").replace(/["'`]+$/, "").trim();
+  return s.length > 40 ? s.slice(0, 40) : s;
+}
+
+async function fetchSuggestion(dateString, key) {
+  const body = {
+    model: getModel(),
+    max_tokens: 60,
+    temperature: 0.7,
+    messages: [
+      { role: "system", content: AI_SYSTEM },
+      { role: "user", content: buildUserPrompt(dateString, loadDays()) }
+    ]
+  };
+  const res = await fetch(OR_ENDPOINT, {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const txt = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  const line = txt ? cleanLine(txt) : "";
+  return line || null;
+}
+
+// non-blocking: keep the seeded preset, swap in the AI line only if it arrives
+// and the user hasn't started editing.
+function attachSuggestion(input, dateString) {
+  if (typeof fetch === "undefined") return;
+  const key = getKey();
+  if (!key) return;
+  const seeded = input.value;
+  fetchSuggestion(dateString, key).then(function (s) {
+    if (s && input.isConnected && input.value === seeded) input.value = s;
+  }).catch(function () {});
+}
+
+// tiny one-time key entry; shown only until a key exists
+function keyLink() {
+  const link = el("button", { text: "🔑 맞춤추천 켜기", cls: "edit" });
+  link.addEventListener("click", function () {
+    const k = window.prompt("OpenRouter API 키를 붙여넣으세요 (sk-or-... ):", "");
+    if (k && k.trim()) { setKey(k.trim()); render(); }
+  });
+  return link;
+}
+
 // ---- date helpers (local time; accept `now` for testability) ----
 function pad2(n) { return n < 10 ? "0" + n : "" + n; }
 
@@ -200,6 +284,8 @@ function renderNightInput(root, target, initial) {
 
   root.appendChild(input);
   root.appendChild(btn);
+  if (!getKey()) root.appendChild(keyLink());
+  attachSuggestion(input, target);
 }
 
 // ---- rule 1: auto-copy (pure decision) ----
@@ -263,6 +349,8 @@ function renderMorning(root) {
     input.addEventListener("keydown", function (e) { if (e.key === "Enter") submit(); });
     root.appendChild(input);
     root.appendChild(btn);
+    if (!getKey()) root.appendChild(keyLink());
+    attachSuggestion(input, today);
     return;
   }
   if (state.mode === "done") {
@@ -299,7 +387,7 @@ function renderMorning(root) {
 
 // ---- exports for node tests (no effect in browser) ----
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { nightView, currentScreen, todayStr, tomorrowStr, mostRecentBefore, getDay, morningState, remainingMs, fmtMMSS, DURATION_MS, carryRecord };
+  module.exports = { nightView, currentScreen, todayStr, tomorrowStr, mostRecentBefore, getDay, morningState, remainingMs, fmtMMSS, DURATION_MS, carryRecord, buildUserPrompt, cleanLine, suggestionFor };
 }
 
 // ---- rule 2: measure (never display) time away during a running timer ----

@@ -874,6 +874,8 @@ function renderHero() {
   ENERGY_LEVELS.forEach(function (lv) {
     const b = el("button", { cls: "echip" + (cur === lv.key ? " on" : ""), text: lv.label });
     b.title = lv.hint;
+    b.setAttribute("aria-label", "오늘 배터리 " + lv.label + " — " + lv.hint);
+    b.setAttribute("aria-pressed", cur === lv.key ? "true" : "false");
     b.addEventListener("click", function () { setEnergy(target, lv.key); render(); });
     eWrap.appendChild(b);
   });
@@ -955,6 +957,7 @@ async function replanFromNow() {
 function renderNote() {
   const today = todayStr();
   const box = el("section", { cls: "note" });
+  box.setAttribute("aria-label", "오늘 한 줄");
   box.appendChild(el("h2", { text: "오늘 한 줄" }));
 
   // 밤 결산 — 오늘 계획이 있으면 자동 요약
@@ -989,6 +992,7 @@ function renderNote() {
 // bottom: streak + visit grid + finished-work archive (secondary info)
 function renderFooter() {
   const box = el("section", { cls: "footer" });
+  box.setAttribute("aria-label", "기록");
   const today = todayStr();
 
   const done = loadDone();
@@ -1026,6 +1030,7 @@ function renderMeals() {
   const m = plan && plan.meals;
   if (!m) return null;
   const box = el("section", { cls: "meals" });
+  box.setAttribute("aria-label", "식단");
   box.appendChild(el("h2", { text: "식단" }));
   [["아침", m.breakfast], ["점심", m.lunch], ["저녁", m.dinner]].forEach(function (pair) {
     if (!pair[1]) return;
@@ -1039,6 +1044,7 @@ function renderMeals() {
 
 function renderProgress() {
   const box = el("section", { cls: "prog" });
+  box.setAttribute("aria-label", "목표 진행도");
   box.appendChild(el("h2", { text: "진행도" }));
   const profile = loadProfile();
   if (!profile.goals.length) {
@@ -1087,6 +1093,7 @@ function genButton(target, label) {
 
 function renderToday() {
   const box = el("section", { cls: "today" });
+  box.setAttribute("aria-label", "오늘 계획");
   const now = new Date();
   const target = activeDate(now);
   const isTomorrow = target !== todayStr(now);
@@ -1104,7 +1111,9 @@ function renderToday() {
   box.appendChild(head);
 
   if (generating) {
-    box.appendChild(el("p", { cls: "muted", text: "AI가 계획 짜는 중…" }));
+    const load = el("p", { cls: "muted", text: "AI가 계획 짜는 중…" });
+    load.setAttribute("role", "status");
+    box.appendChild(load);
     return box;
   }
 
@@ -1124,7 +1133,8 @@ function renderToday() {
     cb.addEventListener("change", function () { setBlockDone(target, b.id, cb.checked, new Date()); render(); });
     row.appendChild(cb);
     row.appendChild(el("span", { cls: "time", text: b.time }));
-    row.appendChild(el("span", { cls: "txt", text: (b.core ? "● " : "") + b.text }));
+    if (b.core) { const dotm = el("span", { cls: "coremark", text: "●" }); dotm.setAttribute("aria-hidden", "true"); row.appendChild(dotm); }
+    row.appendChild(el("span", { cls: "txt", text: b.text }));
     if (b.done && !b.onTime) row.appendChild(el("span", { cls: "badge late", text: "늦음" }));
     else if (b.done && b.onTime) row.appendChild(el("span", { cls: "badge ontime", text: "정시" }));
     else if (open) row.appendChild(el("span", { cls: "badge now", text: "지금" }));
@@ -1132,7 +1142,9 @@ function renderToday() {
   });
   if (plan.source === "template") {
     if (hasAI()) {
-      box.appendChild(el("p", { cls: "err", text: "AI 실패 → 기본 템플릿. 이유: " + (lastAIError || "알 수 없음") }));
+      const errp = el("p", { cls: "err", text: "AI 실패 → 기본 템플릿. 이유: " + (lastAIError || "알 수 없음") });
+      errp.setAttribute("role", "alert");
+      box.appendChild(errp);
       box.appendChild(el("p", { cls: "muted", text: "설정에서 Gemini 키를 넣으면 가장 안정적이에요. 또는 다시 생성." }));
     } else {
       box.appendChild(el("p", { cls: "muted", text: "AI 없이 기본 템플릿입니다. 설정에서 AI를 켜면 맞춤 계획이 됩니다." }));
@@ -1221,8 +1233,9 @@ function renderSettings() {
 
     // add task
     const addRow = el("div", { cls: "addrow" });
-    const ti = el("input"); ti.type = "text"; ti.placeholder = "과제 추가";
+    const ti = el("input"); ti.type = "text"; ti.placeholder = "과제 추가"; ti.setAttribute("aria-label", g.title + " 새 과제");
     const ta = el("button", { cls: "mini", text: "+" });
+    ta.setAttribute("aria-label", g.title + " 과제 추가");
     function addTask() {
       const v = ti.value.trim(); if (!v) return;
       const p = loadProfile();
@@ -1238,7 +1251,9 @@ function renderSettings() {
     // AI breakdown button (generate concrete homework for this goal)
     if (hasAI()) {
       if (breaking === g.id) {
-        gv.appendChild(el("span", { cls: "muted", text: "AI가 과제로 쪼개는 중…" }));
+        const bl = el("span", { cls: "muted", text: "AI가 과제로 쪼개는 중…" });
+        bl.setAttribute("role", "status");
+        gv.appendChild(bl);
       } else {
         const bd = el("button", { cls: "mini bd", text: "🧩 AI로 과제 쪼개기" });
         bd.disabled = !!breaking;
@@ -1253,7 +1268,7 @@ function renderSettings() {
 
   // add goal
   const gadd = el("div", { cls: "addrow" });
-  const gi = el("input"); gi.type = "text"; gi.placeholder = "목표 추가 (예: 데이터베이스 따라가기)";
+  const gi = el("input"); gi.type = "text"; gi.placeholder = "목표 추가 (예: 데이터베이스 따라가기)"; gi.setAttribute("aria-label", "새 목표");
   const gb = el("button", { cls: "mini", text: "목표 추가" });
   function addGoal() {
     const v = gi.value.trim(); if (!v) return;

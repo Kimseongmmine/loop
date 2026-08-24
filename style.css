@@ -83,6 +83,24 @@ h2 {
 .tag { font-size: 15px; font-weight: 600; color: var(--accent); margin: 4px 0 12px; }
 .lede { font-size: 14px; line-height: 1.65; color: #4b5563; margin: 0 0 18px; }
 
+/* now / next bar */
+.nowbar {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 12px 14px; margin: 0 0 14px;
+  background: #f4f6f8; border-radius: 10px;
+}
+.nowbar.active { background: var(--accent-soft); }
+.nlabel { flex: none; font-size: 11px; font-weight: 800; color: var(--muted); }
+.nowbar.active .nlabel { color: var(--accent); }
+.ntext { font-size: 16px; font-weight: 700; }
+.ntime { margin-left: auto; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+/* night summary */
+.sumbox { background: #f7f8fa; border-radius: 8px; padding: 12px 14px; margin: 0 0 12px; }
+.sumbox.good { background: #e7f6ec; }
+.sumline { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+.sumbox.good .sumline { color: var(--ok); }
+
 /* energy picker */
 .energy { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .elabel { font-size: 13px; font-weight: 600; color: var(--muted); margin-right: 2px; }

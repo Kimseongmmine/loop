@@ -503,6 +503,48 @@ function isOnTime(block, date, now) {
   return Math.abs(cur - start) <= ON_TIME_MIN;
 }
 
+// "09:00-11:00" -> 끝 시각(분). 끝이 없으면 시작+60
+function blockEndMinutes(time) {
+  const all = String(time || "").match(/(\d{1,2})\s*:\s*(\d{2})/g);
+  const start = blockStartMinutes(time);
+  if (start == null) return null;
+  if (!all || all.length < 2) return start + 60;
+  const m = all[1].match(/(\d{1,2})\s*:\s*(\d{2})/);
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+// 지금 시각에 해당하는 블록(진행 중), 없으면 다음에 올 블록
+function currentBlock(blocks, now) {
+  now = now || new Date();
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const list = (blocks || []).filter(function (b) { return blockStartMinutes(b.time) != null; });
+  const running = list.find(function (b) {
+    const s = blockStartMinutes(b.time), e = blockEndMinutes(b.time);
+    return cur >= s && cur < e;
+  });
+  if (running) return { block: running, state: "now" };
+  const upcoming = list.filter(function (b) { return blockStartMinutes(b.time) > cur; })
+    .sort(function (a, b) { return blockStartMinutes(a.time) - blockStartMinutes(b.time); })[0];
+  if (upcoming) return { block: upcoming, state: "next" };
+  return null;
+}
+
+// 하루 결산 (순수)
+function daySummary(plan) {
+  const blocks = (plan && plan.blocks) || [];
+  const core = blocks.filter(function (b) { return b.core; });
+  const onTime = core.filter(function (b) { return b.done && b.onTime; });
+  const late = core.filter(function (b) { return b.done && !b.onTime; });
+  const missed = core.filter(function (b) { return !b.done; });
+  return {
+    coreTotal: core.length,
+    onTime: onTime.length,
+    late: late.length,
+    missedList: missed.map(function (b) { return b.text; }),
+    allDone: core.length > 0 && missed.length === 0
+  };
+}
+
 // 핵심 카운터는 "정시 체크"만 인정
 function coreStatus(blocks) {
   const core = (blocks || []).filter(function (b) { return b.core; });
@@ -566,7 +608,8 @@ function weekdayOf(dateString) {
 }
 function dateWithWeekday(dateString) { return dateString + " (" + weekdayOf(dateString) + ")"; }
 
-async function aiGeneratePlan(candidates, targetDate) {
+async function aiGeneratePlan(candidates, targetDate, opts) {
+  opts = opts || {};
   const when = targetDate ? dateWithWeekday(targetDate) : "";
   const sys = "너는 대학 3학년의 하루 시간표를 짜는 코치다. 이 사람은 쉽게 지치고 미룬다. " +
     "반드시 지정된 '날짜와 요일'에 맞춰 짜라. 고정 일정은 요일별로 다르므로 그 요일에 해당하는 것만 반영한다(다른 요일 수업을 넣지 마라). " +
@@ -585,6 +628,7 @@ async function aiGeneratePlan(candidates, targetDate) {
   const notes = targetDate ? recentNotes(targetDate, 3) : [];
   const usr =
     (when ? ("[날짜] " + when + "\n\n") : "") +
+    (opts.fromTime ? ("[지금 " + opts.fromTime + "] 하루가 이미 시작됐다. " + opts.fromTime + "부터 취침까지 남은 시간만으로 다시 짜라. 지나간 시간은 넣지 마라. 남은 시간이 짧으면 핵심을 줄여라.\n\n") : "") +
     (energy && ENERGY_RULE[energy] ? ("[오늘 배터리] " + ENERGY_RULE[energy] + "\n\n") : "") +
     (ctx ? ("[내 프로필]\n" + ctx + "\n\n") : "") +
     (notes.length ? ("[최근 회고 — 반영해서 조정]\n" + notes.map(function (n) { return "- " + n.date + ": " + n.text; }).join("\n") + "\n\n") : "") +
@@ -651,8 +695,9 @@ async function breakdownGoalNow(goalId) {
     render();
   }
 }
-async function generatePlan(targetDate) {
+async function generatePlan(targetDate, opts) {
   if (generating) return;
+  opts = opts || {};
   generating = true;
   render(); // loading state
 
@@ -675,12 +720,34 @@ async function generatePlan(targetDate) {
     const candidates = nextPendingTasks(loadProfile(), 6);
     let blocks = null, meals = null, source = "template";
     if (aiOn) {
-      const res = await aiGeneratePlan(candidates, targetDate);
+      const res = await aiGeneratePlan(candidates, targetDate, opts);
       if (res) { blocks = res.blocks; meals = res.meals; source = "ai"; }
     }
-    if (!blocks) { blocks = templatePlan(candidates); source = "template"; }
+    if (!blocks) {
+      blocks = templatePlan(candidates);
+      if (opts.fromTime) {
+        // 템플릿 폴백에서도 지나간 블록은 버림
+        const cutoff = blockStartMinutes(opts.fromTime);
+        blocks = blocks.filter(function (b) { const s = blockStartMinutes(b.time); return s == null || s >= cutoff; });
+        if (!blocks.length) blocks = templatePlan(candidates).slice(-3);
+      }
+      source = "template";
+    }
+    // 지난/완료 블록 보존 후 시간순 정렬
+    if (opts.keep && opts.keep.length) {
+      const keptIds = {};
+      opts.keep.forEach(function (b) { keptIds[b.id] = true; });
+      blocks = opts.keep.concat(blocks.filter(function (b) { return !keptIds[b.id]; }));
+      blocks.sort(function (a, b) { return (blockStartMinutes(a.time) || 0) - (blockStartMinutes(b.time) || 0); });
+    }
     const plans = loadPlans();
-    plans[targetDate] = { blocks: blocks, meals: meals, generatedAt: new Date().toISOString(), source: source };
+    const prev = plans[targetDate];
+    plans[targetDate] = {
+      blocks: blocks,
+      meals: meals || (prev && prev.meals) || null,
+      generatedAt: new Date().toISOString(),
+      source: source
+    };
     savePlans(plans);
   } catch (e) {
     // last-resort template so the button never leaves an empty screen
@@ -732,6 +799,19 @@ function renderHero() {
 
   box.appendChild(el("h1", { cls: "brand", text: "LOOP" }));
   box.appendChild(el("p", { cls: "tag", text: "고민하지 말고, 정해진 대로." }));
+
+  // 지금 뭐 할 차례 — 오늘 계획이 있을 때만
+  const todayPlan = loadPlans()[todayStr(now)];
+  if (todayPlan && !isTomorrow) {
+    const cb = currentBlock(todayPlan.blocks.filter(function (b) { return !b.done; }), now);
+    if (cb) {
+      const nowbar = el("div", { cls: "nowbar" + (cb.state === "now" ? " active" : "") });
+      nowbar.appendChild(el("span", { cls: "nlabel", text: cb.state === "now" ? "지금" : "다음" }));
+      nowbar.appendChild(el("span", { cls: "ntext", text: cb.block.text }));
+      nowbar.appendChild(el("span", { cls: "ntime", text: cb.block.time }));
+      box.appendChild(nowbar);
+    }
+  }
   box.appendChild(el("p", {
     cls: "lede",
     text: "내 상황(수업·알바·리듬·목표)을 저장해두면, 버튼 한 번에 AI가 " +
@@ -763,11 +843,92 @@ function renderHero() {
   return box;
 }
 
+// ---- 정시 알림 (브라우저 탭이 살아있는 동안 동작) ----
+let notifyTimer = null;
+const notified = {};
+
+function notifyOn() { try { return localStorage.getItem("loop.notify") === "1"; } catch (e) { return false; } }
+function setNotifyOn(v) { try { localStorage.setItem("loop.notify", v ? "1" : "0"); } catch (e) {} }
+
+function fireNotice(block) {
+  const body = block.time + " · 지금 체크하면 정시";
+  try {
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      new Notification("LOOP — " + block.text, { body: body, tag: "loop-" + block.id });
+      return;
+    }
+  } catch (e) {}
+}
+
+// every 30s: if a block just started (within the on-time window) and we haven't
+// pinged for it yet, fire once.
+function startNotifyLoop() {
+  if (notifyTimer || typeof setInterval === "undefined") return;
+  notifyTimer = setInterval(function () {
+    if (!notifyOn()) return;
+    const today = todayStr();
+    const plan = loadPlans()[today];
+    if (!plan) return;
+    const now = new Date();
+    plan.blocks.forEach(function (b) {
+      if (b.done || notified[b.id]) return;
+      const s = blockStartMinutes(b.time);
+      if (s == null) return;
+      const cur = now.getHours() * 60 + now.getMinutes();
+      if (cur >= s && cur <= s + ON_TIME_MIN) { notified[b.id] = true; fireNotice(b); }
+    });
+  }, 30000);
+}
+
+async function enableNotify() {
+  try {
+    if (typeof Notification === "undefined") return false;
+    const p = await Notification.requestPermission();
+    if (p === "granted") { setNotifyOn(true); startNotifyLoop(); render(); return true; }
+  } catch (e) {}
+  return false;
+}
+
+// ---- 지금부터 리셋: 남은 시간만으로 다시 짜기 ----
+async function replanFromNow() {
+  const now = new Date();
+  const today = todayStr(now);
+  const plan = loadPlans()[today];
+  if (!plan) return;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const keep = plan.blocks.filter(function (b) {
+    const s = blockStartMinutes(b.time);
+    return s != null && (s < cur || b.done); // 지난 것/이미 한 것은 보존
+  });
+  const hhmm = pad2(now.getHours()) + ":" + pad2(now.getMinutes());
+  await generatePlan(today, { fromTime: hhmm, keep: keep });
+}
+
 // one-line evening review — feeds tomorrow's planning
 function renderNote() {
   const today = todayStr();
   const box = el("section", { cls: "note" });
   box.appendChild(el("h2", { text: "오늘 한 줄" }));
+
+  // 밤 결산 — 오늘 계획이 있으면 자동 요약
+  const plan = loadPlans()[today];
+  if (plan) {
+    const s = daySummary(plan);
+    const sum = el("div", { cls: "sumbox" + (s.allDone ? " good" : "") });
+    sum.appendChild(el("div", {
+      cls: "sumline",
+      text: s.coreTotal
+        ? ("핵심 " + s.onTime + "/" + s.coreTotal + " 정시" + (s.late ? (" · 늦음 " + s.late) : ""))
+        : "오늘 핵심 블록 없음"
+    }));
+    if (s.allDone) {
+      sum.appendChild(el("div", { cls: "muted", text: "오늘은 성공. 이건 기록에 남습니다." }));
+    } else if (s.missedList.length) {
+      sum.appendChild(el("div", { cls: "muted", text: "못 한 것: " + s.missedList.join(", ") + " — 내일 계획에 자동 반영됩니다." }));
+    }
+    box.appendChild(sum);
+  }
+
   box.appendChild(el("p", { cls: "muted", text: "뭐가 걸렸는지 한 줄만. 내일 계획에 반영됩니다." }));
   const ta = el("textarea", { cls: "finput" });
   ta.placeholder = "예: 오후에 집중 안 됨 / 알바 끝나고 아무것도 못함";
@@ -910,6 +1071,21 @@ function renderToday() {
       box.appendChild(el("p", { cls: "muted", text: "AI 없이 기본 템플릿입니다. 설정에서 AI를 켜면 맞춤 계획이 됩니다." }));
     }
   }
+  const brow = el("div", { cls: "addrow" });
+  if (target === todayStr(new Date())) {
+    const rp = el("button", { cls: "mini bd", text: "⏱ 지금부터 다시 짜기" });
+    rp.disabled = generating;
+    rp.addEventListener("click", function () { replanFromNow(); });
+    brow.appendChild(rp);
+  }
+  if (typeof Notification !== "undefined" && !notifyOn()) {
+    const nb = el("button", { cls: "mini", text: "🔔 정시 알림 켜기" });
+    nb.addEventListener("click", function () { enableNotify(); });
+    brow.appendChild(nb);
+  } else if (notifyOn()) {
+    brow.appendChild(el("span", { cls: "muted", text: "🔔 알림 켜짐 (탭이 열려 있을 때)" }));
+  }
+  if (brow.children.length) box.appendChild(brow);
   box.appendChild(genButton(target, "다시 생성"));
   return box;
 }
@@ -1137,6 +1313,11 @@ function quoteFor(dateString) {
 function boot() {
   saveVisits(recordVisit(loadVisits(), todayStr()));
   render();
+  if (notifyOn()) startNotifyLoop();
+  // 현재/다음 블록 표시가 시간이 지나면 갱신되도록 1분마다 리렌더
+  if (typeof setInterval !== "undefined") {
+    setInterval(function () { if (!generating && !breaking) render(); }, 60000);
+  }
 }
 
 // ---- exports for node tests ----
@@ -1145,7 +1326,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge, isOnTime, blockStartMinutes, setBlockDone
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow
   };
 }
 

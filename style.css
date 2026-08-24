@@ -76,6 +76,7 @@ html, body {
       "today  prog"
       "today  meals"
       "today  note"
+      "today  flow"
       "today  settings"
       "footer footer";
     align-items: start;
@@ -86,12 +87,13 @@ html, body {
   .prog { grid-area: prog; }
   .meals { grid-area: meals; }
   .note { grid-area: note; }
+  .flow { grid-area: flow; }
   .settings { grid-area: settings; }
   .footer { grid-area: footer; }
 }
 
 /* cards */
-.hero, .prog, .today, .settings, .meals, .note, .footer {
+.hero, .prog, .today, .settings, .meals, .note, .flow, .footer {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -297,3 +299,17 @@ button:disabled { opacity: 0.5; cursor: default; }
 .txt, .atext, .ptitle, .tnote, .mtext, .ntext, .goaltop strong, .qtext { overflow-wrap: anywhere; }
 
 .coremark { flex: none; font-size: 9px; color: var(--accent); }
+
+/* 흐름 카드 — 짧은(기록) / 중간(세운) / 긴(대운) */
+.flow { }
+.layer { padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+.llabel { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+.bignum { font-size: 20px; font-weight: 800; margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+.yrow { display: flex; align-items: baseline; gap: 10px; padding: 6px 8px; margin: 0 -8px; font-size: 13px; border-radius: 6px; }
+.yy { flex: none; width: 42px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.ygz { flex: none; width: 34px; font-weight: 700; }
+.ytone { flex: none; width: 40px; font-weight: 600; color: var(--muted); }
+.ynote { color: var(--muted); }
+.yrow.now { background: var(--accent-soft); }
+.yrow.now .ygz, .yrow.now .ytone { color: var(--accent); }
+.yrow.good .ytone { color: var(--ok); }

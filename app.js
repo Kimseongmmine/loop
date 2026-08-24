@@ -771,7 +771,7 @@ async function generatePlan(targetDate, opts) {
 function el(tag, opts) {
   const n = document.createElement(tag);
   if (opts) {
-    if (opts.text != null) n.textContent = opts.text;
+    if (opts.text != null) n.textContent = String(opts.text);
     if (opts.cls) n.className = opts.cls;
     if (opts.html != null) n.innerHTML = opts.html;
   }
@@ -808,6 +808,7 @@ function render() {
   const meals = renderMeals();
   if (meals) root.appendChild(meals);
   root.appendChild(renderNote());
+  root.appendChild(renderFlow());
   root.appendChild(renderSettings());
   root.appendChild(renderFooter());
 
@@ -1324,11 +1325,100 @@ function renderSettings() {
     mrow.appendChild(mc);
   }
   if (mrow.children.length) box.appendChild(mrow);
-  box.appendChild(renderTimeline());
   return box;
 }
 
 // ---- 대운 타임라인 (긴 호흡의 앵커; 접어둠) ----
+// ---- 세운(년운): 60갑자로 정확히 계산된다. 1984년 = 甲子 기준 ----
+const STEMS = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"];
+const BRANCHES = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"];
+// 각 글자의 오행 → 용신 水 · 희신 金 · 기신 火土 기준으로 그 해의 성격을 판정
+const STEM_EL = { 甲: "목", 乙: "목", 丙: "화", 丁: "화", 戊: "토", 己: "토", 庚: "금", 辛: "금", 壬: "수", 癸: "수" };
+const BRANCH_EL = { 子: "수", 丑: "토", 寅: "목", 卯: "목", 辰: "토", 巳: "화", 午: "화", 未: "토", 申: "금", 酉: "금", 戌: "토", 亥: "수" };
+
+function yearPillar(year) {
+  const i = ((year - 1984) % 60 + 60) % 60;
+  return STEMS[i % 10] + BRANCHES[i % 12];
+}
+
+// 그 해가 도움이 되는 해인지(금·수) 버티는 해인지(화·토) 판정
+function yearTone(year) {
+  const gz = yearPillar(year);
+  const els = [STEM_EL[gz[0]], BRANCH_EL[gz[1]]];
+  const good = els.filter(function (e) { return e === "금" || e === "수"; }).length;
+  const bad = els.filter(function (e) { return e === "화" || e === "토"; }).length;
+  if (good === 2) return { key: "good", label: "순풍", note: "희신·용신이 함께 드는 해" };
+  if (good === 1) return { key: "mixed", label: "전환", note: "도움이 되는 기운이 절반 들어옴" };
+  if (bad === 2) return { key: "hold", label: "축적", note: "기신 구간 — 벌이지 말고 쌓을 때" };
+  return { key: "mixed", label: "보통", note: "" };
+}
+
+function yearFlow(fromYear, count) {
+  const out = [];
+  for (let i = 0; i < (count || 6); i++) {
+    const y = fromYear + i;
+    const gz = yearPillar(y);
+    out.push({ year: y, gz: gz, el: STEM_EL[gz[0]] + BRANCH_EL[gz[1]], tone: yearTone(y) });
+  }
+  return out;
+}
+
+// ---- 짧은 흐름: 사주가 아니라 내 실제 기록 ----
+// 최근 n일의 정시율·배터리·요일 경향·가장 오래 밀린 과제
+function recentStats(today, days) {
+  const n = days || 7;
+  const plans = loadPlans(), energy = loadEnergy();
+  let onTime = 0, coreTotal = 0, late = 0;
+  const battery = { high: 0, mid: 0, low: 0 };
+  const byWeekday = {};   // 요일별 { core, onTime }
+  for (let i = 0; i < n; i++) {
+    const d = addDays(today, -i);
+    const p = plans[d];
+    const e = energy[d];
+    if (e && battery[e] != null) battery[e]++;
+    if (!p) continue;
+    const core = p.blocks.filter(function (b) { return b.core; });
+    const ot = core.filter(function (b) { return b.done && b.onTime; }).length;
+    coreTotal += core.length;
+    onTime += ot;
+    late += core.filter(function (b) { return b.done && !b.onTime; }).length;
+    const w = weekdayOf(d);
+    if (!byWeekday[w]) byWeekday[w] = { core: 0, onTime: 0 };
+    byWeekday[w].core += core.length;
+    byWeekday[w].onTime += ot;
+  }
+  // 가장 약한 요일 (핵심이 2개 이상 있었던 요일 중 정시율 최저)
+  let worstDay = null;
+  Object.keys(byWeekday).forEach(function (w) {
+    const v = byWeekday[w];
+    if (v.core < 2) return;
+    const rate = v.onTime / v.core;
+    if (!worstDay || rate < worstDay.rate) worstDay = { day: w, rate: rate, core: v.core, onTime: v.onTime };
+  });
+  return {
+    days: n,
+    onTime: onTime, late: late, coreTotal: coreTotal,
+    pct: coreTotal ? Math.round((onTime / coreTotal) * 100) : null,
+    battery: battery,
+    worstDay: worstDay
+  };
+}
+
+// 가장 오래 밀린 미완료 과제 (진행도가 멈춘 지점)
+function stalledTask(profile) {
+  const goals = (profile && profile.goals) || [];
+  for (let i = 0; i < goals.length; i++) {
+    const pending = (goals[i].tasks || []).filter(function (t) { return !t.done; });
+    const done = (goals[i].tasks || []).filter(function (t) { return t.done; }).length;
+    if (pending.length && done > 0) return { text: pending[0].text, goalTitle: goals[i].title };
+  }
+  for (let i = 0; i < goals.length; i++) {
+    const pending = (goals[i].tasks || []).filter(function (t) { return !t.done; });
+    if (pending.length) return { text: pending[0].text, goalTitle: goals[i].title };
+  }
+  return null;
+}
+
 const BIRTH_YEAR = 2002;
 const LUCK_CYCLES = [
   { from: 1, gz: "丁未", note: "유년" },
@@ -1348,6 +1438,53 @@ function currentCycle(age) {
   let cur = LUCK_CYCLES[0];
   for (let i = 0; i < LUCK_CYCLES.length; i++) { if (age >= LUCK_CYCLES[i].from) cur = LUCK_CYCLES[i]; }
   return cur;
+}
+
+// "흐름" 카드 — 짧은(내 기록 7일) → 중간(세운) → 긴(대운) 세 층위
+function renderFlow() {
+  const now = new Date();
+  const today = todayStr(now);
+  const box = el("section", { cls: "flow" });
+  box.setAttribute("aria-label", "흐름");
+  box.appendChild(el("h2", { text: "흐름" }));
+
+  // --- 짧은 흐름: 사주가 아니라 실제 기록 ---
+  const s = recentStats(today, 7);
+  const short = el("div", { cls: "layer" });
+  short.appendChild(el("div", { cls: "llabel", text: "최근 7일 · 내 기록" }));
+  if (s.pct == null) {
+    short.appendChild(el("div", { cls: "muted", text: "아직 기록이 없습니다. 계획을 만들고 정시에 체크하면 여기에 쌓입니다." }));
+  } else {
+    short.appendChild(el("div", { cls: "bignum", text: "정시 " + s.onTime + "/" + s.coreTotal + " (" + s.pct + "%)" + (s.late ? "  · 늦음 " + s.late : "") }));
+    const b = s.battery;
+    if (b.high || b.mid || b.low) {
+      short.appendChild(el("div", { cls: "muted", text: "배터리 빵빵 " + b.high + " · 보통 " + b.mid + " · 방전 " + b.low }));
+    }
+    if (s.worstDay) {
+      short.appendChild(el("div", { cls: "muted", text: s.worstDay.day + "이 가장 약함 — 정시 " + s.worstDay.onTime + "/" + s.worstDay.core }));
+    }
+  }
+  const st = stalledTask(loadProfile());
+  if (st) short.appendChild(el("div", { cls: "muted", text: "다음 차례: " + st.text + " · " + st.goalTitle }));
+  box.appendChild(short);
+
+  // --- 중간 흐름: 세운 6년 ---
+  const mid = el("div", { cls: "layer" });
+  mid.appendChild(el("div", { cls: "llabel", text: "앞으로 6년 · 세운" }));
+  yearFlow(now.getFullYear(), 6).forEach(function (y, i) {
+    const row = el("div", { cls: "yrow " + y.tone.key + (i === 0 ? " now" : "") });
+    row.appendChild(el("span", { cls: "yy", text: String(y.year) }));
+    row.appendChild(el("span", { cls: "ygz", text: y.gz }));
+    row.appendChild(el("span", { cls: "ytone", text: y.tone.label }));
+    if (i === 0 || y.tone.key === "good") row.appendChild(el("span", { cls: "ynote", text: y.tone.note }));
+    mid.appendChild(row);
+  });
+  box.appendChild(mid);
+
+  // --- 긴 흐름: 대운 (접어둠) ---
+  box.appendChild(renderTimeline());
+  box.appendChild(el("p", { cls: "muted", text: "사주는 성향의 지도이지 확정된 미래가 아닙니다. 위 7일 숫자만이 실제로 일어난 일입니다." }));
+  return box;
 }
 
 function renderTimeline() {
@@ -1412,7 +1549,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, render
   };
 }
 

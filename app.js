@@ -185,6 +185,18 @@ function parseTaskList(content) {
   if (j && Array.isArray(j.tasks) && j.tasks.length) {
     return j.tasks.map(function (t) { return String(t).trim(); }).filter(Boolean);
   }
+  // top-level JSON array e.g. ["a","b"] (Gemini JSON mode may return this)
+  const trimmed = String(content || "").trim();
+  if (trimmed[0] === "[") {
+    try {
+      const arr = JSON.parse(trimmed);
+      if (Array.isArray(arr) && arr.length) {
+        const items = arr.map(function (x) { return typeof x === "string" ? x : (x && (x.text || x.task || x.title)); })
+          .filter(Boolean).map(function (s) { return String(s).trim(); });
+        if (items.length) return items;
+      }
+    } catch (e) {}
+  }
   const raw = String(content || "").split("\n");
   const marker = /^\s*(?:[-*•]|\d+[\.\)])\s+/;
   // prefer lines that carry a list marker; drop the marker + wrapping quotes
@@ -266,6 +278,8 @@ async function geminiChat(messages, maxTokens, parse) {
   const userParts = messages.filter(function (m) { return m.role !== "system"; }).map(function (m) { return { text: m.content }; });
   const url = "https://generativelanguage.googleapis.com/v1beta/models/" + getGemModel() + ":generateContent?key=" + encodeURIComponent(key);
   const body = { contents: [{ role: "user", parts: userParts }], generationConfig: { maxOutputTokens: maxTokens || 900, temperature: 0.6 } };
+  // force clean JSON output when the caller expects to parse it (no preamble / reasoning text)
+  if (parse) body.generationConfig.responseMimeType = "application/json";
   if (sys) body.system_instruction = { parts: [{ text: sys }] };
   try {
     const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -376,7 +390,7 @@ async function aiBreakdownGoal(goal) {
     "규칙: 각 과제는 한 번에 60분 안에 끝낼 수 있어야 하고, '무엇을 얼마나' 명확해야 한다. " +
     "추상적 표현 금지('공부하기','정리하기','복습하기' 같은 것 금지). " +
     "구체적으로('3장 연습문제 1~10번 풀기','1강 강의 듣고 필기 2쪽','기출 2회분 채점까지'). " +
-    "5~8개, 쉬운 것부터 순서대로. 한국어. 번호 목록으로, 한 줄에 하나씩만 출력. 설명·인사 금지.";
+    "5~8개, 쉬운 것부터 순서대로. 한국어. 설명·인사·사고과정 없이 오직 JSON만 출력: {\"tasks\":[\"과제1\",\"과제2\"]}";
   const traits = (loadProfile().traits || "").trim();
   const usr = "목표: " + goal.title +
     (goal.deadline ? ("\n마감: " + goal.deadline) : "") +

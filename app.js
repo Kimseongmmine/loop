@@ -57,6 +57,31 @@ function formatKoDate(dateString) {
   return Number(parts[1]) + "월 " + Number(parts[2]) + "일";
 }
 
+// ---- timer (pure, time-based) ----
+const DURATION_MS = 60 * 60 * 1000; // 60 minutes
+
+function remainingMs(startedAtISO, now) {
+  const started = new Date(startedAtISO).getTime();
+  return DURATION_MS - ((now || new Date()).getTime() - started);
+}
+
+function fmtMMSS(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const mm = Math.floor(total / 60);
+  const ss = total % 60;
+  return pad2(mm) + ":" + pad2(ss);
+}
+
+// morning state machine (pure). caller persists on "expired".
+function morningState(record, now) {
+  if (!record) return { mode: "empty" };
+  if (record.completed) return { mode: "done" };
+  if (!record.started_at) return { mode: "ready", task: record.task };
+  const rem = remainingMs(record.started_at, now);
+  if (rem <= 0) return { mode: "expired", task: record.task };
+  return { mode: "running", task: record.task, remainingMs: rem };
+}
+
 // ---- screen dispatch ----
 // 21:00–03:59 -> night, 04:00–20:59 -> morning
 function currentScreen(now) {
@@ -93,7 +118,10 @@ function confirmTask(target, task, now) {
 }
 
 // ---- render ----
+let tickHandle = null;
+
 function render() {
+  if (tickHandle) { clearInterval(tickHandle); tickHandle = null; }
   const root = document.getElementById("screen");
   root.innerHTML = "";
   if (currentScreen() === "night") renderNight(root);
@@ -159,14 +187,57 @@ function renderNightInput(root, target, initial) {
   root.appendChild(btn);
 }
 
-// ---- stub (filled in step 3) ----
+// ---- morning ----
+function markCompleted(date) {
+  const days = loadDays();
+  const rec = getDay(days, date);
+  if (rec && !rec.completed) { rec.completed = true; upsertDay(rec); }
+}
+
 function renderMorning(root) {
-  root.textContent = "morning";
+  const today = todayStr();
+  const record = getDay(loadDays(), today);
+  const state = morningState(record, new Date());
+
+  if (state.mode === "empty") {
+    root.appendChild(el("p", { text: "", cls: "task" }));
+    return;
+  }
+  if (state.mode === "done") {
+    root.appendChild(el("p", { text: "완료", cls: "task" }));
+    return;
+  }
+  if (state.mode === "expired") {
+    markCompleted(today);
+    root.appendChild(el("p", { text: "완료", cls: "task" }));
+    return;
+  }
+  if (state.mode === "ready") {
+    root.appendChild(el("p", { text: state.task, cls: "task" }));
+    const btn = el("button", { text: "시작", cls: "start" });
+    btn.addEventListener("click", function () {
+      const days = loadDays();
+      const rec = getDay(days, today);
+      if (rec && !rec.started_at) { rec.started_at = new Date().toISOString(); upsertDay(rec); }
+      render();
+    });
+    root.appendChild(btn);
+    return;
+  }
+  // running
+  const timer = el("p", { text: fmtMMSS(state.remainingMs), cls: "timer" });
+  root.appendChild(timer);
+  tickHandle = setInterval(function () {
+    const rec = getDay(loadDays(), today);
+    const rem = remainingMs(rec.started_at, new Date());
+    if (rem <= 0) { clearInterval(tickHandle); tickHandle = null; render(); return; }
+    timer.textContent = fmtMMSS(rem);
+  }, 250);
 }
 
 // ---- exports for node tests (no effect in browser) ----
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { nightView, currentScreen, todayStr, tomorrowStr, mostRecentBefore, getDay };
+  module.exports = { nightView, currentScreen, todayStr, tomorrowStr, mostRecentBefore, getDay, morningState, remainingMs, fmtMMSS, DURATION_MS };
 }
 
 if (typeof document !== "undefined") render();

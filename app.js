@@ -60,6 +60,44 @@ function profileContext(profile) {
 function loadPlans() { return lsGet(K_PLANS, {}) || {}; }
 function savePlans(p) { lsSet(K_PLANS, p); }
 
+// ---- energy (배터리) · 회고 · 완주 보관함 ----
+const K_ENERGY = "loop.energy";   // { "YYYY-MM-DD": "high"|"mid"|"low" }
+const K_NOTES = "loop.notes";     // { "YYYY-MM-DD": "한 줄 회고" }
+const K_DONE = "loop.done";       // [{ text, goalTitle, date }]
+
+const ENERGY_LEVELS = [
+  { key: "high", label: "빵빵", hint: "핵심 3개 + 보너스" },
+  { key: "mid", label: "보통", hint: "핵심 3개" },
+  { key: "low", label: "방전", hint: "핵심 1개만" }
+];
+const ENERGY_RULE = {
+  high: "오늘 컨디션 좋음: 핵심 학습 3개까지, 딥워크 블록 조금 길게(최대 90분).",
+  mid: "오늘 컨디션 보통: 핵심 3개, 블록은 60분 이하, 사이사이 휴식 충분히.",
+  low: "오늘 배터리 방전: 절대 몰아붙이지 마라. 핵심은 1개만(core:true 1개), 나머지는 휴식·가벼운 정리·산책 위주. 총 학습 2시간 이내."
+};
+
+function loadEnergy() { return lsGet(K_ENERGY, {}) || {}; }
+function getEnergy(date) { return loadEnergy()[date] || ""; }
+function setEnergy(date, level) { const e = loadEnergy(); e[date] = level; lsSet(K_ENERGY, e); }
+
+function loadNotes() { return lsGet(K_NOTES, {}) || {}; }
+function getNote(date) { return loadNotes()[date] || ""; }
+function setNote(date, text) { const n = loadNotes(); n[date] = text; lsSet(K_NOTES, n); }
+// most recent notes before `date`, newest first
+function recentNotes(date, limit) {
+  const n = loadNotes();
+  return Object.keys(n).filter(function (d) { return d < date && n[d]; }).sort().reverse()
+    .slice(0, limit || 3).map(function (d) { return { date: d, text: n[d] }; });
+}
+
+function loadDone() { const d = lsGet(K_DONE, []); return Array.isArray(d) ? d : []; }
+function archiveDone(entry) {
+  const list = loadDone();
+  if (list.some(function (x) { return x.text === entry.text && x.date === entry.date; })) return;
+  list.push(entry);
+  lsSet(K_DONE, list);
+}
+
 function loadVisits() { const v = lsGet(K_VISITS, []); return Array.isArray(v) ? v : []; }
 function saveVisits(v) { lsSet(K_VISITS, v); }
 
@@ -404,8 +442,10 @@ function templatePlan(candidates) {
   return [
     study(0, "09:00-11:00"),
     study(1, "11:00-12:00"),
+    life("11:00-11:10", "물 한 잔 · 눈 휴식(먼 곳 보기)"),
     life("12:00-13:00", "점심"),
     life("13:00-14:00", "휴식 · 산책"),
+    life("15:00-15:10", "물 한 잔 · 눈 휴식"),
     study(2, "14:00-16:00"),
     life("16:00-17:00", "운동 (수영 우선)"),
     life("17:00-19:00", "저녁 · 휴식"),
@@ -461,7 +501,12 @@ function setBlockDone(date, blockId, checked) {
     const profile = loadProfile();
     for (let i = 0; i < profile.goals.length; i++) {
       const t = (profile.goals[i].tasks || []).find(function (x) { return x.id === block.taskId; });
-      if (t) { t.done = checked; saveProfile(profile); break; }
+      if (t) {
+        t.done = checked;
+        saveProfile(profile);
+        if (checked) archiveDone({ text: t.text, goalTitle: profile.goals[i].title, date: date });
+        break;
+      }
     }
   }
 }
@@ -503,14 +548,19 @@ async function aiGeneratePlan(candidates, targetDate) {
     "현실적으로: 딥워크 사이에 휴식·이동·식사, 저녁은 가볍게, 강도 절반, 몰아치기 금지. " +
     "후보 과제를 시간표에 배치하고(각 블록 ref에 후보 index), 휴식/식사/운동/고정일정 같은 생활 블록은 ref 없이 넣어라. " +
     "가장 중요한 3개 학습 블록에만 core:true. " +
-    "meals에는 그날의 아침·점심·저녁 식단을 간단히 제안한다(간편하고 현실적인 한 끼, 15자 내외). " +
+    "이 사람은 쉽게 지치고 눈이 건조하다: 딥워크 사이에 '물 마시기·눈 휴식(먼 곳 보기)' 같은 짧은 회복 블록을 최소 2개 넣어라. " +
+    "meals에는 그날의 아침·점심·저녁 식단을 간단히 제안한다(간편하고 현실적인 한 끼, 15자 내외, 수분 보충 고려). " +
     "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"ref\":0,\"core\":true}]," +
     "\"meals\":{\"아침\":\"...\",\"점심\":\"...\",\"저녁\":\"...\"}}";
   const ctx = profileContext(loadProfile());
   const list = candidates.map(function (c, i) { return i + ": " + c.text + " (" + c.goalTitle + ")"; }).join("\n");
+  const energy = targetDate ? getEnergy(targetDate) : "";
+  const notes = targetDate ? recentNotes(targetDate, 3) : [];
   const usr =
     (when ? ("[날짜] " + when + "\n\n") : "") +
+    (energy && ENERGY_RULE[energy] ? ("[오늘 배터리] " + ENERGY_RULE[energy] + "\n\n") : "") +
     (ctx ? ("[내 프로필]\n" + ctx + "\n\n") : "") +
+    (notes.length ? ("[최근 회고 — 반영해서 조정]\n" + notes.map(function (n) { return "- " + n.date + ": " + n.text; }).join("\n") + "\n\n") : "") +
     "[후보 과제]\n" + (list || "(없음)") +
     "\n\n위 날짜/요일에 맞춰 시간표와 식단을 JSON으로.";
   // accept JSON {blocks:[...]}, a bare JSON array, OR a plain text schedule
@@ -634,12 +684,96 @@ function render() {
   const root = document.getElementById("screen");
   if (!root) return;
   root.innerHTML = "";
-  root.appendChild(renderHeader());
-  root.appendChild(renderProgress());
+  root.appendChild(renderHero());
   root.appendChild(renderToday());
+  root.appendChild(renderProgress());
   const meals = renderMeals();
   if (meals) root.appendChild(meals);
+  const note = renderNote();
+  if (note) root.appendChild(note);
   root.appendChild(renderSettings());
+  root.appendChild(renderFooter());
+}
+
+// landing/hero: what this app does + energy picker + the main action
+function renderHero() {
+  const box = el("section", { cls: "hero" });
+  const now = new Date();
+  const target = activeDate(now);
+  const isTomorrow = target !== todayStr(now);
+  const plan = loadPlans()[target];
+
+  box.appendChild(el("h1", { cls: "brand", text: "LOOP" }));
+  box.appendChild(el("p", { cls: "tag", text: "고민하지 말고, 정해진 대로." }));
+  box.appendChild(el("p", {
+    cls: "lede",
+    text: "내 상황(수업·알바·리듬·목표)을 저장해두면, 버튼 한 번에 AI가 " +
+      (isTomorrow ? "내일" : "오늘") + " 하루를 시간대별로 짜줍니다. " +
+      "오전엔 집중 잘 되는 시간에 핵심 공부, 사이사이 물·눈 휴식, 점심·저녁과 운동, 밤엔 가볍게 마무리. " +
+      "그중 굵게 표시된 핵심 3개만 하면 그날은 성공입니다."
+  }));
+
+  // energy picker — battery-aware planning
+  const eWrap = el("div", { cls: "energy" });
+  eWrap.appendChild(el("span", { cls: "elabel", text: "오늘 배터리" }));
+  const cur = getEnergy(target);
+  ENERGY_LEVELS.forEach(function (lv) {
+    const b = el("button", { cls: "echip" + (cur === lv.key ? " on" : ""), text: lv.label });
+    b.title = lv.hint;
+    b.addEventListener("click", function () { setEnergy(target, lv.key); render(); });
+    eWrap.appendChild(b);
+  });
+  box.appendChild(eWrap);
+
+  box.appendChild(genButton(target, plan ? "계획 다시 생성" : (isTomorrow ? "내일 계획 생성" : "오늘 계획 생성")));
+  return box;
+}
+
+// one-line evening review — feeds tomorrow's planning
+function renderNote() {
+  const today = todayStr();
+  const box = el("section", { cls: "note" });
+  box.appendChild(el("h2", { text: "오늘 한 줄" }));
+  box.appendChild(el("p", { cls: "muted", text: "뭐가 걸렸는지 한 줄만. 내일 계획에 반영됩니다." }));
+  const ta = el("textarea", { cls: "finput" });
+  ta.placeholder = "예: 오후에 집중 안 됨 / 알바 끝나고 아무것도 못함";
+  ta.value = getNote(today);
+  ta.addEventListener("change", function () { setNote(today, ta.value.trim()); });
+  box.appendChild(ta);
+  return box;
+}
+
+// bottom: streak + visit grid + finished-work archive (secondary info)
+function renderFooter() {
+  const box = el("section", { cls: "footer" });
+  const today = todayStr();
+
+  const done = loadDone();
+  const dwrap = el("details", { cls: "arch" });
+  dwrap.appendChild(el("summary", { text: "🏁 내가 끝낸 것들 (" + done.length + ")" }));
+  if (!done.length) {
+    dwrap.appendChild(el("p", { cls: "muted", text: "완료한 과제가 여기 쌓입니다. 지워지지 않아요." }));
+  } else {
+    done.slice().reverse().slice(0, 50).forEach(function (d) {
+      const row = el("div", { cls: "arow" });
+      row.appendChild(el("span", { cls: "adate", text: d.date }));
+      row.appendChild(el("span", { cls: "atext", text: d.text + (d.goalTitle ? (" · " + d.goalTitle) : "") }));
+      dwrap.appendChild(row);
+    });
+  }
+  box.appendChild(dwrap);
+
+  const swrap = el("details", { cls: "arch" });
+  swrap.appendChild(el("summary", { text: "🔥 접속 기록 · " + computeStreak(loadVisits(), today) + "일 연속" }));
+  const grid = el("div", { cls: "grid" });
+  visitGrid(loadVisits(), today, 28).forEach(function (d) {
+    const dot = el("span", { cls: "dot" + (d.visited ? " on" : "") });
+    dot.title = d.date;
+    grid.appendChild(dot);
+  });
+  swrap.appendChild(grid);
+  box.appendChild(swrap);
+  return box;
 }
 
 // meal suggestions for the active day (only when the AI produced them)
@@ -657,22 +791,6 @@ function renderMeals() {
     row.appendChild(el("span", { cls: "mtext", text: pair[1] }));
     box.appendChild(row);
   });
-  return box;
-}
-
-function renderHeader() {
-  const box = el("section", { cls: "hdr" });
-  const today = todayStr();
-  box.appendChild(el("div", { cls: "date", text: today }));
-  const streak = computeStreak(loadVisits(), today);
-  box.appendChild(el("div", { cls: "streak", text: "🔥 " + streak + "일 연속 접속" }));
-  const grid = el("div", { cls: "grid" });
-  visitGrid(loadVisits(), today, 28).forEach(function (d) {
-    const dot = el("span", { cls: "dot" + (d.visited ? " on" : "") });
-    dot.title = d.date;
-    grid.appendChild(dot);
-  });
-  box.appendChild(grid);
   return box;
 }
 
@@ -726,8 +844,7 @@ function renderToday() {
   }
 
   if (!plan) {
-    box.appendChild(el("p", { cls: "muted", text: "아직 계획이 없어요. 아래 버튼을 누르면 AI가 짜줍니다." }));
-    box.appendChild(genButton(target, "계획 생성"));
+    box.appendChild(el("p", { cls: "muted", text: "아직 계획이 없어요. 위의 “계획 생성”을 누르면 AI가 짜줍니다." }));
     return box;
   }
 

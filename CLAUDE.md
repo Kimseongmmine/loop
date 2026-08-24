@@ -44,20 +44,6 @@
 - 손대지 않은 템플릿은 목표/과제 추가 시 즉시 갱신(refreshTemplateIfUntouched)
 - 무키/실패/깨진 JSON → 고정 템플릿 시간표로 폴백. 앱 안 깨짐
 
-## 핵심 함수 (app.js)
-- 순수: computeStreak, visitGrid, goalProgress, nextPendingTasks, templatePlan, mapAIBlocks, coreStatus, extractJSON
-- AI: orChat, aiBreakdownGoal(A), aiGeneratePlan(B), aiEnhance
-- 렌더: renderHeader/renderProgress/renderToday/renderSettings
-
-## 작업 순서 (v1 — 전부 완료)
-1. [x] 데이터 계층(profile/plans/visits, 스트릭·진행도) + 유닛테스트
-2. [x] 대시보드 골격(헤더·스트릭 그리드·진행도)
-3. [x] 설정: 목표/과제 CRUD·수동 체크
-4. [x] AI 배관(분해 A·계획 B·관대 파서·템플릿 폴백)
-5. [x] 오늘 계획 렌더·핵심3·체크→진행도 연동
-6. [x] style.css 대시보드
-7. [x] README/CLAUDE.md 갱신
-
 ## 상태: v1 완성
 - 순수 유닛테스트(33개) + 헤드리스 DOM(대시보드 흐름) + AI 스텁(분해/계획/폴백) 전부 통과
 - 배포: 폴더째 Vercel

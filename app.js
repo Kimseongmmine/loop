@@ -436,17 +436,19 @@ function templatePlan(candidates) {
   const c = candidates || [];
   function study(i, time) {
     if (c[i]) return { id: genId("b"), time: time, text: c[i].text, goalId: c[i].goalId, taskId: c[i].taskId, core: true, done: false };
-    return { id: genId("b"), time: time, text: "딥워크 (자유)", goalId: null, taskId: null, core: false, done: false };
+    // 후보 과제가 없을 때도 핵심 슬롯은 비우지 않는다. 첫 슬롯만 살리고 나머지는 여백으로.
+    if (i === 0) return { id: genId("b"), time: time, text: "집중 블록 — 아래 설정에서 목표를 적으면 여기가 채워집니다", goalId: null, taskId: null, core: true, done: false };
+    return { id: genId("b"), time: time, text: "집중 블록 (자유)", goalId: null, taskId: null, core: false, done: false };
   }
   function life(time, text) { return { id: genId("b"), time: time, text: text, goalId: null, taskId: null, core: false, done: false }; }
   return [
-    study(0, "09:00-11:00"),
+    study(0, "09:00-10:50"),
+    life("10:50-11:00", "물 한 잔 · 눈 휴식(먼 곳 보기)"),
     study(1, "11:00-12:00"),
-    life("11:00-11:10", "물 한 잔 · 눈 휴식(먼 곳 보기)"),
     life("12:00-13:00", "점심"),
     life("13:00-14:00", "휴식 · 산책"),
-    life("15:00-15:10", "물 한 잔 · 눈 휴식"),
-    study(2, "14:00-16:00"),
+    study(2, "14:00-15:50"),
+    life("15:50-16:00", "물 한 잔 · 눈 휴식"),
     life("16:00-17:00", "운동 (수영 우선)"),
     life("17:00-19:00", "저녁 · 휴식"),
     c[3] ? { id: genId("b"), time: "19:00-21:00", text: c[3].text, goalId: c[3].goalId, taskId: c[3].taskId, core: false, done: false }
@@ -733,13 +735,16 @@ async function generatePlan(targetDate, opts) {
       }
       source = "template";
     }
-    // 지난/완료 블록 보존 후 시간순 정렬
+    // 지난/완료 블록 보존
     if (opts.keep && opts.keep.length) {
-      const keptIds = {};
-      opts.keep.forEach(function (b) { keptIds[b.id] = true; });
-      blocks = opts.keep.concat(blocks.filter(function (b) { return !keptIds[b.id]; }));
-      blocks.sort(function (a, b) { return (blockStartMinutes(a.time) || 0) - (blockStartMinutes(b.time) || 0); });
+      const keptIds = {}, keptStarts = {};
+      opts.keep.forEach(function (b) { keptIds[b.id] = true; keptStarts[b.time] = true; });
+      blocks = opts.keep.concat(blocks.filter(function (b) {
+        return !keptIds[b.id] && !keptStarts[b.time]; // 보존된 시간대와 겹치는 새 블록은 버림
+      }));
     }
+    // 항상 시간순 정렬 (AI든 템플릿이든, keep이 있든 없든)
+    blocks.sort(function (a, b) { return (blockStartMinutes(a.time) || 0) - (blockStartMinutes(b.time) || 0); });
     const plans = loadPlans();
     const prev = plans[targetDate];
     plans[targetDate] = {
@@ -774,19 +779,61 @@ function el(tag, opts) {
 }
 
 // ---- render ----
+// 어떤 <details>가 열려 있었는지 기억해 재렌더 후 복원한다.
+const openPanels = {};
+function markOpen(det, key) {
+  det.open = !!openPanels[key];
+  det.addEventListener("toggle", function () { openPanels[key] = det.open; });
+  return det;
+}
+
+// 재렌더가 사용자의 작업을 삼키지 않도록 포커스·커서·열린 패널을 보존한다.
 function render() {
   const root = document.getElementById("screen");
   if (!root) return;
+
+  // 1) 현재 포커스된 입력의 위치를 기억
+  let restore = null;
+  try {
+    const a = document.activeElement;
+    if (a && (a.tagName === "TEXTAREA" || a.tagName === "INPUT") && a.dataset && a.dataset.k) {
+      restore = { k: a.dataset.k, start: a.selectionStart, end: a.selectionEnd };
+    }
+  } catch (e) {}
+
   root.innerHTML = "";
   root.appendChild(renderHero());
   root.appendChild(renderToday());
   root.appendChild(renderProgress());
   const meals = renderMeals();
   if (meals) root.appendChild(meals);
-  const note = renderNote();
-  if (note) root.appendChild(note);
+  root.appendChild(renderNote());
   root.appendChild(renderSettings());
   root.appendChild(renderFooter());
+
+  // 2) 같은 필드를 다시 찾아 포커스와 커서 위치를 되돌림
+  if (restore) {
+    try {
+      const next = root.querySelector('[data-k="' + restore.k + '"]');
+      if (next) {
+        next.focus();
+        if (next.setSelectionRange && restore.start != null) next.setSelectionRange(restore.start, restore.end);
+      }
+    } catch (e) {}
+  }
+}
+
+// 입력 중 유실을 막는 표준 바인딩: 타이핑 즉시(디바운스) 저장 + 필드 식별자 부여
+function bindField(node, key, save) {
+  node.dataset.k = key;
+  let t = null;
+  node.addEventListener("input", function () {
+    if (t) clearTimeout(t);
+    t = setTimeout(function () { save(node.value); }, 400);
+  });
+  node.addEventListener("change", function () { if (t) clearTimeout(t); save(node.value); });
+  node.addEventListener("blur", function () { if (t) clearTimeout(t); save(node.value); });
+  return node;
 }
 
 // landing/hero: what this app does + energy picker + the main action
@@ -933,7 +980,8 @@ function renderNote() {
   const ta = el("textarea", { cls: "finput" });
   ta.placeholder = "예: 오후에 집중 안 됨 / 알바 끝나고 아무것도 못함";
   ta.value = getNote(today);
-  ta.addEventListener("change", function () { setNote(today, ta.value.trim()); });
+  ta.setAttribute("aria-label", "오늘 한 줄 회고");
+  bindField(ta, "note", function (v) { setNote(today, v.trim()); });
   box.appendChild(ta);
   return box;
 }
@@ -944,7 +992,7 @@ function renderFooter() {
   const today = todayStr();
 
   const done = loadDone();
-  const dwrap = el("details", { cls: "arch" });
+  const dwrap = markOpen(el("details", { cls: "arch" }), "done");
   dwrap.appendChild(el("summary", { text: "🏁 내가 끝낸 것들 (" + done.length + ")" }));
   if (!done.length) {
     dwrap.appendChild(el("p", { cls: "muted", text: "완료한 과제가 여기 쌓입니다. 지워지지 않아요." }));
@@ -958,7 +1006,7 @@ function renderFooter() {
   }
   box.appendChild(dwrap);
 
-  const swrap = el("details", { cls: "arch" });
+  const swrap = markOpen(el("details", { cls: "arch" }), "visits");
   swrap.appendChild(el("summary", { text: "🔥 접속 기록 · " + computeStreak(loadVisits(), today) + "일 연속" }));
   const grid = el("div", { cls: "grid" });
   visitGrid(loadVisits(), today, 28).forEach(function (d) {
@@ -1011,10 +1059,29 @@ function renderProgress() {
   return box;
 }
 
+// 재생성은 그날의 실행 기록(체크·정시)을 절대 지우지 않는다.
+// 완료했거나 이미 지나간 블록은 보존하고, 남은 부분만 새로 짠다.
+function keepableBlocks(targetDate, now) {
+  const plan = loadPlans()[targetDate];
+  if (!plan) return [];
+  const sameDay = targetDate === todayStr(now || new Date());
+  const cur = (now || new Date()).getHours() * 60 + (now || new Date()).getMinutes();
+  return plan.blocks.filter(function (b) {
+    if (b.done) return true;                       // 한 것은 무조건 보존
+    if (!sameDay) return false;                    // 미래 날짜는 전부 새로 짜도 됨
+    const s = blockStartMinutes(b.time);
+    return s != null && s < cur;                   // 오늘 지나간 시간대도 보존
+  });
+}
+
 function genButton(target, label) {
   const btn = el("button", { cls: "gen", text: label });
   btn.disabled = generating;
-  btn.addEventListener("click", function () { generatePlan(target); });
+  btn.addEventListener("click", function () {
+    const keep = keepableBlocks(target, new Date());
+    const doneCount = keep.filter(function (b) { return b.done; }).length;
+    generatePlan(target, { keep: keep, preserved: doneCount });
+  });
   return btn;
 }
 
@@ -1091,7 +1158,7 @@ function renderToday() {
 }
 
 function renderSettings() {
-  const box = el("details", { cls: "settings" });
+  const box = markOpen(el("details", { cls: "settings" }), "settings");
   const sum = el("summary", { text: "설정 · 목표" });
   box.appendChild(sum);
 
@@ -1102,12 +1169,15 @@ function renderSettings() {
   info.appendChild(el("div", { cls: "infohd", text: "내 정보 (채울수록 계획이 정확해져요)" }));
   PROFILE_FIELDS.forEach(function (fld) {
     const wrap = el("div", { cls: "field" });
-    wrap.appendChild(el("label", { cls: "flabel", text: fld.label }));
+    const lab = el("label", { cls: "flabel", text: fld.label });
+    lab.htmlFor = "f-" + fld.key;
+    wrap.appendChild(lab);
     const ta = el("textarea", { cls: "finput" });
+    ta.id = "f-" + fld.key;
     ta.placeholder = fld.ph;
     ta.value = profile[fld.key] || "";
-    ta.addEventListener("change", function () {
-      const p = loadProfile(); p[fld.key] = ta.value; saveProfile(p);
+    bindField(ta, "f-" + fld.key, function (v) {
+      const p = loadProfile(); p[fld.key] = v; saveProfile(p);
     });
     wrap.appendChild(ta);
     info.appendChild(wrap);
@@ -1119,9 +1189,10 @@ function renderSettings() {
     const top = el("div", { cls: "goaltop" });
     top.appendChild(el("strong", { text: g.title }));
     const dl = el("input", { cls: "dl" }); dl.type = "text"; dl.placeholder = "마감(선택)"; dl.value = g.deadline || "";
-    dl.addEventListener("change", function () {
+    dl.setAttribute("aria-label", g.title + " 마감일");
+    bindField(dl, "dl-" + g.id, function (v) {
       const p = loadProfile(); const gg = findGoal(p, g.id);
-      if (gg) { gg.deadline = dl.value; saveProfile(p); }
+      if (gg) { gg.deadline = v; saveProfile(p); }
     });
     top.appendChild(dl);
     const del = el("button", { cls: "mini", text: "삭제" });
@@ -1265,7 +1336,7 @@ function currentCycle(age) {
 }
 
 function renderTimeline() {
-  const box = el("details", { cls: "arch tl" });
+  const box = markOpen(el("details", { cls: "arch tl" }), "timeline");
   const age = currentAge(new Date());
   const cur = currentCycle(age);
   box.appendChild(el("summary", { text: "🧭 긴 호흡 — 지금 어디쯤인가 (" + age + "세 · " + cur.gz + ")" }));
@@ -1326,7 +1397,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, render
   };
 }
 

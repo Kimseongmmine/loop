@@ -483,19 +483,46 @@ function mapAIBlocks(aiBlocks, candidates) {
   return out;
 }
 
+// 정시 판정: 블록 시작시각 ±ON_TIME_MIN 안에 체크해야 "정시 시작"
+const ON_TIME_MIN = 5;
+
+// "09:00-11:00" -> 540 (분). 파싱 실패 시 null
+function blockStartMinutes(time) {
+  const m = String(time || "").match(/(\d{1,2})\s*:\s*(\d{2})/);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+// 지금이 그 블록의 정시 창(시작 -5분 ~ +5분) 안인가
+function isOnTime(block, date, now) {
+  now = now || new Date();
+  if (todayStr(now) !== date) return false;         // 다른 날 소급 체크는 정시 아님
+  const start = blockStartMinutes(block && block.time);
+  if (start == null) return false;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  return Math.abs(cur - start) <= ON_TIME_MIN;
+}
+
+// 핵심 카운터는 "정시 체크"만 인정
 function coreStatus(blocks) {
   const core = (blocks || []).filter(function (b) { return b.core; });
-  return { done: core.filter(function (b) { return b.done; }).length, total: core.length };
+  return {
+    done: core.filter(function (b) { return b.done && b.onTime; }).length,
+    late: core.filter(function (b) { return b.done && !b.onTime; }).length,
+    total: core.length
+  };
 }
 
 // toggle a block; sync its linked goal task
-function setBlockDone(date, blockId, checked) {
+function setBlockDone(date, blockId, checked, now) {
   const plans = loadPlans();
   const plan = plans[date];
   if (!plan) return;
   const block = plan.blocks.find(function (b) { return b.id === blockId; });
   if (!block) return;
   block.done = checked;
+  block.onTime = checked ? isOnTime(block, date, now) : false;
+  if (checked) block.checkedAt = (now || new Date()).toISOString();
   savePlans(plans);
   if (block.taskId) {
     const profile = loadProfile();
@@ -841,7 +868,10 @@ function renderToday() {
   head.appendChild(el("h2", { text: (isTomorrow ? "내일 계획" : "오늘 계획") + " · " + dateWithWeekday(target) }));
   if (plan) {
     const cs = coreStatus(plan.blocks);
-    head.appendChild(el("span", { cls: "core" + (cs.done >= cs.total && cs.total ? " done" : ""), text: "핵심 " + cs.done + "/" + cs.total + " · 셋만 하면 성공" }));
+    head.appendChild(el("span", {
+      cls: "core" + (cs.done >= cs.total && cs.total ? " done" : ""),
+      text: "핵심 " + cs.done + "/" + cs.total + " 정시" + (cs.late ? (" · 늦음 " + cs.late) : "")
+    }));
   }
   box.appendChild(head);
 
@@ -855,15 +885,21 @@ function renderToday() {
     return box;
   }
 
+  box.appendChild(el("p", { cls: "muted onhint", text: "체크는 블록 시작시각 ±5분 안에 눌러야 “정시”로 인정됩니다. 늦게 눌러도 기록은 남아요." }));
+  const nowTick = new Date();
   plan.blocks.forEach(function (b) {
-    const row = el("label", { cls: "block" + (b.core ? " isCore" : "") + (b.done ? " off" : "") });
+    const open = !b.done && isOnTime(b, target, nowTick);
+    const row = el("label", { cls: "block" + (b.core ? " isCore" : "") + (b.done ? " off" : "") + (open ? " open" : "") });
     const cb = el("input");
     cb.type = "checkbox";
     cb.checked = !!b.done;
-    cb.addEventListener("change", function () { setBlockDone(target, b.id, cb.checked); render(); });
+    cb.addEventListener("change", function () { setBlockDone(target, b.id, cb.checked, new Date()); render(); });
     row.appendChild(cb);
     row.appendChild(el("span", { cls: "time", text: b.time }));
     row.appendChild(el("span", { cls: "txt", text: (b.core ? "● " : "") + b.text }));
+    if (b.done && !b.onTime) row.appendChild(el("span", { cls: "badge late", text: "늦음" }));
+    else if (b.done && b.onTime) row.appendChild(el("span", { cls: "badge ontime", text: "정시" }));
+    else if (open) row.appendChild(el("span", { cls: "badge now", text: "지금" }));
     box.appendChild(row);
   });
   if (plan.source === "template") {
@@ -1109,7 +1145,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge, isOnTime, blockStartMinutes, setBlockDone
   };
 }
 

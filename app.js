@@ -210,6 +210,44 @@ function parseTaskList(content) {
   return plain.length >= 3 ? plain : null;
 }
 
+// parse a human-readable schedule the model wrote as text, e.g.
+//   * 09:00 - 10:15 [고정일정] 이동 및 등교
+//   - 10:30~12:00 DB 1강 듣기 (핵심)
+// returns block-shaped objects {time, text, core} so mapAIBlocks can consume them.
+function parseTextSchedule(content, candidates) {
+  const cands = candidates || [];
+  const range = /(\d{1,2}\s*[:：]\s*\d{2})\s*(?:-|–|—|~|to|부터)\s*(\d{1,2}\s*[:：]\s*\d{2})/;
+  const out = [];
+  String(content || "").split("\n").forEach(function (line) {
+    const m = line.match(range);
+    if (!m) return;
+    const t1 = m[1].replace(/\s/g, "").replace("：", ":");
+    const t2 = m[2].replace(/\s/g, "").replace("：", ":");
+    let text = line.slice(line.indexOf(m[0]) + m[0].length)
+      .replace(/^[\s:：\-–—|·>]+/, "")
+      .replace(/^[\[(]?(핵심|core|중요)[\])]?[\s:·-]*/i, "")
+      .replace(/[\[(]\s*(핵심|core|중요|필수)\s*[\])]\s*$/i, "")
+      .replace(/\*\*/g, "")
+      .trim();
+    if (!text) {
+      // text may sit before the time range ("이동 및 등교 09:00-10:15")
+      text = line.slice(0, line.indexOf(m[0])).replace(/^[\s*\-–—•\d.\)]+/, "").trim();
+    }
+    if (!text) return;
+    const core = /핵심|core|중요|필수/i.test(line);
+    // link to a candidate task when the text mentions it
+    let ref = null;
+    for (let i = 0; i < cands.length; i++) {
+      const key = String(cands[i].text || "").slice(0, 10);
+      if (key && text.indexOf(key) !== -1) { ref = i; break; }
+    }
+    const b = { time: t1 + "-" + t2, text: text.slice(0, 80), core: core };
+    if (ref != null) b.ref = ref;
+    out.push(b);
+  });
+  return out.length >= 3 ? out : null;
+}
+
 let lastAIError = "";
 
 async function orOnce(key, model, messages, maxTokens) {
@@ -417,8 +455,18 @@ async function aiGeneratePlan(candidates) {
     (ctx ? ("[내 프로필]\n" + ctx + "\n\n") : "") +
     "[후보 과제]\n" + (list || "(없음)") +
     "\n\n위를 반영해 시간표를 JSON으로.";
-  const parse = function (c) { const j = extractJSON(c); return (j && Array.isArray(j.blocks) && j.blocks.length) ? j.blocks : null; };
-  const blocks = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 900, parse);
+  // accept JSON {blocks:[...]}, a bare JSON array, OR a plain text schedule
+  const parse = function (c) {
+    const j = extractJSON(c);
+    if (j && Array.isArray(j.blocks) && j.blocks.length) return j.blocks;
+    if (j && Array.isArray(j.schedule) && j.schedule.length) return j.schedule;
+    const t = String(c || "").trim();
+    if (t[0] === "[") {
+      try { const arr = JSON.parse(t); if (Array.isArray(arr) && arr.length && arr[0] && arr[0].time) return arr; } catch (e) {}
+    }
+    return parseTextSchedule(c, candidates);
+  };
+  const blocks = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 1200, parse);
   if (blocks) return mapAIBlocks(blocks, candidates);
   return null;
 }
@@ -766,7 +814,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow
+    parseTaskList, breakdownGoalNow, parseTextSchedule
   };
 }
 

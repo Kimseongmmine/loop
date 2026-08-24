@@ -22,12 +22,40 @@ const K_VISITS = "loop.visits";
 const K_ORKEY = "loop.or_key";
 const K_ORMODEL = "loop.or_model";
 
+// profile text fields the user fills in (all optional), fed to the AI planner
+const PROFILE_FIELDS = [
+  { key: "fixed", label: "고정 일정 (수업·알바)", ph: "예: 월수금 9-12 전공수업 / 화 알바 18-22 / 목 공강" },
+  { key: "rhythm", label: "하루 리듬", ph: "예: 8시 기상 1시 취침 / 오전 집중 잘됨 / 밥 먹고 나면 졸림" },
+  { key: "traits", label: "나의 특성", ph: "예: 쉽게 지침 / 1시간 넘으면 딴짓 / 시작이 어려움" },
+  { key: "prefs", label: "선호·비선호", ph: "예: 운동은 수영 / 아침 일찍은 싫음 / 카페에서 집중 잘됨" }
+];
+
 function loadProfile() {
   const p = lsGet(K_PROFILE, { goals: [] });
   if (!p || !Array.isArray(p.goals)) return { goals: [] };
+  // migrate legacy `situation` -> `traits`
+  if (p.situation && !p.traits) { p.traits = p.situation; delete p.situation; }
   return p;
 }
 function saveProfile(p) { lsSet(K_PROFILE, p); }
+
+// assemble the user's profile into a context string for the AI (pure)
+function profileContext(profile) {
+  const lines = [];
+  const f = (profile.fixed || "").trim();
+  const r = (profile.rhythm || "").trim();
+  const t = (profile.traits || "").trim();
+  const pr = (profile.prefs || "").trim();
+  if (f) lines.push("고정 일정(이 시간대는 반드시 비워두거나 이동/식사로, 학습 블록 금지): " + f);
+  if (r) lines.push("하루 리듬(기상~취침 안에서, 집중 잘 되는 시간에 핵심 배치): " + r);
+  if (t) lines.push("나의 특성(강도·휴식 조절에 반영): " + t);
+  if (pr) lines.push("선호·비선호: " + pr);
+  const deadlines = (profile.goals || [])
+    .filter(function (g) { return g.deadline; })
+    .map(function (g) { return "- " + g.title + ": 마감 " + g.deadline; });
+  if (deadlines.length) lines.push("마감 있는 목표(급한 것을 앞쪽·핵심으로):\n" + deadlines.join("\n"));
+  return lines.join("\n");
+}
 
 function loadPlans() { return lsGet(K_PLANS, {}) || {}; }
 function savePlans(p) { lsSet(K_PLANS, p); }
@@ -279,11 +307,11 @@ function setBlockDone(date, blockId, checked) {
 async function aiBreakdownGoal(goal) {
   const sys = "너는 학습 코치다. 주어진 목표를 60분 안에 하나씩 끝낼 수 있는 아주 구체적인 실행 과제 5~8개로 쪼갠다. " +
     "순서대로, 작고 명확하게. 한국어. 오직 JSON만 출력: {\"tasks\":[\"과제1\",\"과제2\"]}";
-  const situation = (loadProfile().situation || "").trim();
+  const traits = (loadProfile().traits || "").trim();
   const usr = "목표: " + goal.title +
     (goal.deadline ? ("\n마감: " + goal.deadline) : "") +
     (goal.note ? ("\n메모: " + goal.note) : "") +
-    (situation ? ("\n내 상황: " + situation) : "");
+    (traits ? ("\n내 특성: " + traits) : "");
   const parse = function (c) { const j = extractJSON(c); return (j && Array.isArray(j.tasks) && j.tasks.length) ? j.tasks : null; };
   const tasks = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 500, parse);
   if (tasks) {
@@ -294,20 +322,17 @@ async function aiBreakdownGoal(goal) {
 
 async function aiGeneratePlan(candidates) {
   const sys = "너는 대학 3학년의 하루 시간표를 짜는 코치다. 이 사람은 쉽게 지치고 미룬다. " +
-    "09:00~24:00을 시간 블록으로 채우되 현실적으로: 딥워크 사이에 휴식·이동·식사, 저녁은 가볍게. 강도는 절반, 몰아치기 금지. " +
-    "주어진 후보 과제를 시간표에 배치하고(각 블록의 ref에 후보 index), 휴식/식사/운동 같은 생활 블록은 ref 없이 넣어라. " +
+    "아래 '내 프로필'을 최우선으로 반영해라: 고정 일정 시간대는 절대 학습 블록으로 쓰지 말고 그대로 두거나 이동/식사로 채운다. " +
+    "하루 리듬의 기상~취침 시간 안에서만 짜고, 집중 잘 되는 시간대에 핵심 학습을 배치한다. " +
+    "현실적으로: 딥워크 사이에 휴식·이동·식사, 저녁은 가볍게, 강도 절반, 몰아치기 금지. " +
+    "후보 과제를 시간표에 배치하고(각 블록 ref에 후보 index), 휴식/식사/운동/고정일정 같은 생활 블록은 ref 없이 넣어라. " +
     "가장 중요한 3개 학습 블록에만 core:true. 오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"ref\":0,\"core\":true}]}";
-  const profile = loadProfile();
-  const situation = (profile.situation || "").trim();
-  const deadlines = profile.goals
-    .filter(function (g) { return g.deadline; })
-    .map(function (g) { return "- " + g.title + ": 마감 " + g.deadline; }).join("\n");
+  const ctx = profileContext(loadProfile());
   const list = candidates.map(function (c, i) { return i + ": " + c.text + " (" + c.goalTitle + ")"; }).join("\n");
   const usr =
-    (situation ? ("내 상황: " + situation + "\n\n") : "") +
-    (deadlines ? ("마감 있는 목표:\n" + deadlines + "\n\n") : "") +
-    "후보 과제:\n" + (list || "(없음)") +
-    "\n\n09~24시 시간표를 JSON으로. 마감 급한 목표를 앞쪽·핵심으로.";
+    (ctx ? ("[내 프로필]\n" + ctx + "\n\n") : "") +
+    "[후보 과제]\n" + (list || "(없음)") +
+    "\n\n위를 반영해 시간표를 JSON으로.";
   const parse = function (c) { const j = extractJSON(c); return (j && Array.isArray(j.blocks) && j.blocks.length) ? j.blocks : null; };
   const blocks = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 900, parse);
   if (blocks) return mapAIBlocks(blocks, candidates);
@@ -480,17 +505,22 @@ function renderSettings() {
 
   const profile = loadProfile();
 
-  // free-text situation memo (fed to the AI planner)
-  const sitWrap = el("div", { cls: "sitwrap" });
-  sitWrap.appendChild(el("div", { cls: "muted", text: "내 상황 (AI가 계획 짤 때 참고)" }));
-  const sit = el("textarea", { cls: "situation" });
-  sit.placeholder = "예: 아침에 약함 / 화요일 공강 / 정처기 7월 시험 / 저녁엔 집중 안 됨";
-  sit.value = profile.situation || "";
-  sit.addEventListener("change", function () {
-    const p = loadProfile(); p.situation = sit.value; saveProfile(p);
+  // "내 정보" — categorized profile fields (all optional), fed to the AI planner
+  const info = el("div", { cls: "infowrap" });
+  info.appendChild(el("div", { cls: "infohd", text: "내 정보 (채울수록 계획이 정확해져요)" }));
+  PROFILE_FIELDS.forEach(function (fld) {
+    const wrap = el("div", { cls: "field" });
+    wrap.appendChild(el("label", { cls: "flabel", text: fld.label }));
+    const ta = el("textarea", { cls: "finput" });
+    ta.placeholder = fld.ph;
+    ta.value = profile[fld.key] || "";
+    ta.addEventListener("change", function () {
+      const p = loadProfile(); p[fld.key] = ta.value; saveProfile(p);
+    });
+    wrap.appendChild(ta);
+    info.appendChild(wrap);
   });
-  sitWrap.appendChild(sit);
-  box.appendChild(sitWrap);
+  box.appendChild(info);
 
   profile.goals.forEach(function (g) {
     const gv = el("div", { cls: "goal" });
@@ -604,7 +634,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
-    templatePlan, mapAIBlocks, coreStatus, generatePlan
+    templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile
   };
 }
 

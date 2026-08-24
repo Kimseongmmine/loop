@@ -18,8 +18,15 @@
 - 저장 localStorage만. 서버 없음. Vercel 정적 배포
 - AI: OpenRouter 무료 모델. 키는 localStorage "loop.or_key"에만(코드·깃 미포함)
 
+## 프로필 양식 (v1.2)
+- `loop.profile`에 카테고리 텍스트 필드: `fixed`(고정일정), `rhythm`(하루리듬), `traits`(특성), `prefs`(선호). 전부 선택.
+- 구버전 `situation` → `traits` 자동 마이그레이션(loadProfile)
+- `profileContext(profile)`가 4필드+마감을 AI 컨텍스트로 조립 → aiGeneratePlan에 주입
+- 계획 프롬프트 규칙: 고정일정 시간대엔 학습블록 금지, 하루리듬 기상~취침 내, 집중시간에 핵심 배치
+- 설정 UI: "내 정보" 블록(PROFILE_FIELDS 4개 라벨 textarea + 예시 placeholder)
+
 ## 데이터 모델 (localStorage)
-- `loop.profile` = { goals:[ { id, title, note, tasks:[{id,text,done}], analyzedAt } ] }
+- `loop.profile` = { fixed, rhythm, traits, prefs, goals:[ { id, title, deadline, tasks:[{id,text,done}] } ] }
   - 진행도 = done/total (goalProgress)
 - `loop.plans` = { "YYYY-MM-DD": { blocks:[{id,time,text,goalId,taskId,core,done}], generatedAt, source:"template"|"ai" } }
   - 학습 블록은 goalId+taskId 보유, 체크 시 해당 task 완료 → 진행도 연동. 생활 블록은 null

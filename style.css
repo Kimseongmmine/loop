@@ -1,49 +1,53 @@
 * { box-sizing: border-box; }
 
-/* 팔레트는 대비비를 계산해 맞춘 값이다. 텍스트 토큰은 흰 카드 위에서 전부 4.5:1 이상.
-   --faint 는 텍스트 금지, 비활성 점·구분선 같은 비텍스트 전용. */
+/* ─────────────────────────────────────────────────────────────
+   팔레트: 水金. 사용자 원국 기준 용신 水 · 희신 金 · 기신 火土.
+   그래서 이 파일에는 빨강·주황·앰버·크림 계열이 존재하지 않는다.
+   라이트 = 金(백·은 바탕) / 다크 = 水(심해 바탕). 강조는 물빛 하나.
+   모든 값은 대비비를 계산해 채택했다. 텍스트 4.5:1, UI 3:1 이상.
+   ───────────────────────────────────────────────────────────── */
 :root {
-  --bg: #eef1f5;
+  --bg: #e9edf1;          /* 은회백 — 금속판 */
   --card: #ffffff;
-  --line: #cfd4da;        /* 1.11:1 -> 카드 경계가 실제로 보이는 값 */
-  --ink: #1a1d21;
-  --muted: #5b6270;       /* 흰 배경 6.0:1 */
-  --dim: #5f6673;         /* 보조 텍스트. 흰 5.8:1, 연파랑 위 5.0:1 */
-  --faint: #8f959e;       /* 비텍스트 전용(빈 점 등), 흰 배경 3.0:1 */
-  --field-line: #8f959e;  /* 입력·버튼 테두리, 흰 배경 3.0:1 */
-  --accent: #1d4ed8;      /* --accent-soft 위 6.0:1 (구 2563eb는 4.48:1로 미달) */
-  --accent-soft: #e8effe;
-  --fire: #8f4108;        /* 연앰버 위 6.4:1 */
-  --fire-soft: #fdf1dc;
-  --ok: #0f5c2c;          /* 연초록 위 7.3:1 */
-  --ok-soft: #e7f6ec;
-  --danger: #b91c1c;
-  --neutral-soft: #eceef1;
-  --track: #dfe3e8;
-  --focus: #1d4ed8;
+  --line: #ccd4dc;        /* 금속 hairline */
+  --field-line: #828e9a;  /* 조작 요소 테두리, 흰 위 3.3:1 */
+  --ink: #0f1720;         /* 짙은 남 — 물의 잉크, 18.1:1 */
+  --muted: #516070;       /* 6.5:1 */
+  --dim: #5b6b7a;         /* 5.5:1 */
+  --faint: #828e9a;       /* 비텍스트 전용, 흰 위 3.3:1 */
+  --accent: #075985;      /* 물빛 딥블루. 흰 7.6:1, 연물빛 위 6.6:1 */
+  --accent-soft: #e0f2fe;
+  --now: #075985;         /* '지금' — 앰버(火)를 물빛으로 교체 */
+  --now-soft: #dff1fb;
+  --ok: #115e59;          /* 청록. 연청록 위 6.4:1 */
+  --ok-soft: #d7f2ee;
+  --danger: #334155;      /* 오류도 붉지 않다 — 무채 + 굵기로 전달 */
+  --neutral-soft: #e7ebef;
+  --track: #d5dce3;
+  --focus: #075985;
 }
 
-/* 다크 팔레트 — 주 사용 시간대가 21시 이후이고 눈 피로가 제품 요구사항 */
+/* 다크 = 水. 21시 이후가 주 사용 시간이므로 이쪽이 실질 기본이다. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #14161a;
-    --card: #1c1f25;
-    --line: #333842;
-    --ink: #eceef1;
-    --muted: #a5adba;
-    --dim: #a5adba;
-    --faint: #6d7686;
-    --field-line: #6d7686;
-    --accent: #7aa2f7;
-    --accent-soft: #23304d;
-    --fire: #f0b429;
-    --fire-soft: #3a2f14;
-    --ok: #5dd68f;
-    --ok-soft: #17331f;
-    --danger: #f87171;
-    --neutral-soft: #262a31;
-    --track: #2b3038;
-    --focus: #7aa2f7;
+    --bg: #070c12;        /* 심해 */
+    --card: #0e1721;      /* 수면 한 겹 위 */
+    --line: #24313e;
+    --field-line: #59697a;
+    --ink: #dbe7ef;       /* 은빛 — 14.4:1 */
+    --muted: #93a5b5;     /* 7.1:1 */
+    --dim: #8fa2b3;       /* 6.9:1 */
+    --faint: #5c6e7e;
+    --accent: #7dd3fc;    /* 10.8:1 */
+    --accent-soft: #10293b;
+    --now: #7dd3fc;
+    --now-soft: #0d2534;
+    --ok: #5eead4;
+    --ok-soft: #0d2b28;
+    --danger: #b8c6d4;
+    --neutral-soft: #16202b;
+    --track: #1d2833;
+    --focus: #7dd3fc;
   }
 }
 
@@ -96,9 +100,8 @@ html, body {
 .hero, .prog, .today, .settings, .meals, .note, .flow, .footer {
   background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 10px;
   padding: 18px;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
 }
 
 h2 {
@@ -124,7 +127,7 @@ h2 {
   background: var(--neutral-soft); border-radius: 10px;
 }
 .nowbar.active { background: var(--accent-soft); }
-.nlabel { flex: none; font-size: 11px; font-weight: 800; color: var(--muted); }
+.nlabel { flex: none; font-size: 10px; font-weight: 800; color: var(--muted); letter-spacing: 0.12em; }
 .nowbar.active .nlabel { color: var(--accent); }
 .ntext { font-size: 16px; font-weight: 700; }
 .ntime { margin-left: auto; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
@@ -138,7 +141,7 @@ h2 {
 /* energy picker */
 .energy { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .elabel { font-size: 13px; font-weight: 600; color: var(--muted); margin-right: 2px; }
-.echip { font-size: 13px; padding: 11px 16px; min-height: 44px; border-radius: 999px; }
+.echip { font-size: 13px; padding: 11px 16px; min-height: 44px; border-radius: 4px; letter-spacing: 0.02em; }
 .echip.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
 
 /* quote of the day */
@@ -172,15 +175,15 @@ h2 {
 .adate { flex: none; color: var(--dim); font-variant-numeric: tabular-nums; }
 .atext { color: var(--muted); }
 .grid { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 10px; }
-.dot { width: 13px; height: 13px; border-radius: 4px; background: var(--faint); }
-.dot.on { background: var(--accent); }
+.dot { width: 11px; height: 11px; border-radius: 50%; background: transparent; border: 1px solid var(--faint); }
+.dot.on { background: var(--accent); border-color: var(--accent); }
 
 /* progress */
 .prow { margin-bottom: 14px; }
 .prow:last-child { margin-bottom: 0; }
 .ptitle { font-size: 14px; font-weight: 500; margin-bottom: 7px; }
-.bar { height: 9px; background: var(--track); border-radius: 6px; overflow: hidden; }
-.fill { height: 100%; background: var(--accent); border-radius: 6px; }
+.bar { height: 6px; background: var(--track); border-radius: 1px; overflow: hidden; }
+.fill { height: 100%; background: var(--accent); border-radius: 1px; }
 
 /* today */
 .todayhead { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
@@ -197,8 +200,8 @@ h2 {
   cursor: pointer;
 }
 .block + .block { border-top: 1px solid var(--line); }
-.block.isCore { background: var(--accent-soft); }
-.block .time { font-size: 12px; color: var(--dim); min-width: 76px; font-variant-numeric: tabular-nums; }
+.block.isCore { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.block .time { font-size: 12px; color: var(--dim); min-width: 76px; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
 .block .txt { font-size: 15px; }
 .block.isCore .txt { color: var(--ink); font-weight: 700; }
 .block:not(.isCore) .txt { color: var(--muted); }
@@ -208,11 +211,11 @@ input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--accent);
 
 /* on-time checking */
 .onhint { margin: 0 0 10px; }
-.block.open { background: var(--fire-soft); }
-.badge { flex: none; margin-left: auto; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
-.badge.late { background: var(--neutral-soft); color: var(--muted); }
-.badge.ontime { background: var(--ok-soft); color: var(--ok); }
-.badge.now { background: var(--fire-soft); color: var(--fire); }
+.block.open { background: var(--now-soft); box-shadow: inset 3px 0 0 var(--now); }
+.badge { flex: none; margin-left: auto; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 3px; letter-spacing: 0.06em; border: 1px solid currentColor; background: transparent !important; }
+.badge.late { color: var(--muted); }
+.badge.ontime { color: var(--ok); }
+.badge.now { color: var(--now); }
 
 /* meals */
 .meal { display: flex; align-items: baseline; gap: 12px; padding: 9px 2px; }
@@ -227,7 +230,7 @@ button {
   color: var(--ink);
   font-size: 14px;
   padding: 9px 14px;
-  border-radius: 8px;
+  border-radius: 4px;
   cursor: pointer;
   font-family: inherit;
   white-space: nowrap;
@@ -257,7 +260,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .settings[open] summary { margin-bottom: 14px; }
 
 .infowrap { margin-bottom: 18px; }
-.infohd { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+.infohd { font-size: 11px; color: var(--muted); margin-bottom: 12px; letter-spacing: 0.09em; text-transform: uppercase; font-weight: 700; }
 .aihd { font-size: 14px; font-weight: 700; margin: 18px 0 6px; }
 .field { margin-bottom: 12px; }
 .flabel { display: block; font-size: 13px; font-weight: 600; color: var(--ink); margin-bottom: 5px; }
@@ -269,7 +272,7 @@ button:disabled { opacity: 0.5; cursor: default; }
   font-size: 14px;
   line-height: 1.5;
   padding: 9px 11px;
-  border-radius: 8px;
+  border-radius: 4px;
   outline: none;
 }
 .finput, .situation { width: 100%; }
@@ -303,7 +306,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 /* 흐름 카드 — 짧은(기록) / 중간(세운) / 긴(대운) */
 .flow { }
 .layer { padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
-.llabel { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+.llabel { font-size: 11px; font-weight: 700; color: var(--muted); margin-bottom: 8px; letter-spacing: 0.09em; text-transform: uppercase; }
 .bignum { font-size: 20px; font-weight: 800; margin-bottom: 6px; font-variant-numeric: tabular-nums; }
 .yrow { display: flex; align-items: baseline; gap: 10px; padding: 6px 8px; margin: 0 -8px; font-size: 13px; border-radius: 6px; }
 .yy { flex: none; width: 42px; color: var(--dim); font-variant-numeric: tabular-nums; }
@@ -324,3 +327,31 @@ button:disabled { opacity: 0.5; cursor: default; }
 .shop { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .shoplist { margin: 6px 0 0; padding-left: 18px; }
 .shoplist li { font-size: 14px; padding: 3px 0; color: var(--muted); }
+
+/* 브랜드 링 — 지금까지 쓰지 않던 loop 자산을 표식으로 */
+.mark { display: flex; align-items: center; gap: 10px; }
+.ring { flex: none; width: 22px; height: 22px; }
+.ring circle { fill: none; stroke: var(--accent); stroke-width: 2.6; }
+.brand { font-size: 26px; font-weight: 800; letter-spacing: 0.06em; margin: 0; }
+
+/* '지금' 파문 — 절제된 단 하나의 모션 */
+.nowbar.active .nlabel::after {
+  content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px;
+  border-radius: 50%; background: var(--now); vertical-align: middle;
+  animation: ripple 2.4s ease-out infinite;
+}
+@keyframes ripple { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .nowbar.active .nlabel::after { animation: none; } }
+
+/* 시각 눈금 축 — 시간이 위에서 아래로 흐른다 */
+.today .block { position: relative; }
+.blocks { position: relative; padding-left: 14px; }
+.blocks::before {
+  content: ""; position: absolute; left: 4px; top: 6px; bottom: 6px;
+  width: 1px; background: var(--line);
+}
+.block::before {
+  content: ""; position: absolute; left: -10px; top: 50%; width: 5px; height: 1px;
+  background: var(--faint);
+}
+.block.isCore::before, .block.open::before { background: var(--accent); width: 9px; left: -12px; }

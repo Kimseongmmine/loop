@@ -824,6 +824,21 @@ async function generatePlan(targetDate, opts) {
 }
 
 // ---- DOM helpers ----
+// 브랜드 링(loop). SVG는 네임스페이스로 만들어야 실제로 렌더된다.
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgRing() {
+  if (!document.createElementNS) return null;
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "ring");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const c = document.createElementNS(SVG_NS, "circle");
+  c.setAttribute("cx", "12"); c.setAttribute("cy", "12"); c.setAttribute("r", "9");
+  svg.appendChild(c);
+  return svg;
+}
+
+
 function el(tag, opts) {
   const n = document.createElement(tag);
   if (opts) {
@@ -901,7 +916,11 @@ function renderHero() {
   const isTomorrow = target !== todayStr(now);
   const plan = loadPlans()[target];
 
-  box.appendChild(el("h1", { cls: "brand", text: "LOOP" }));
+  const mark = el("div", { cls: "mark" });
+  const ring = svgRing();
+  if (ring) mark.appendChild(ring);
+  mark.appendChild(el("h1", { cls: "brand", text: "LOOP" }));
+  box.appendChild(mark);
   box.appendChild(el("p", { cls: "tag", text: "고민하지 말고, 정해진 대로." }));
 
   // 지금 뭐 할 차례 — 오늘 계획이 있을 때만
@@ -1209,6 +1228,7 @@ function renderToday() {
 
   box.appendChild(el("p", { cls: "muted onhint", text: "체크는 블록 시작시각 ±5분 안에 눌러야 “정시”로 인정됩니다. 늦게 눌러도 기록은 남아요." }));
   const nowTick = new Date();
+  const blocksWrap = el("div", { cls: "blocks" });
   plan.blocks.forEach(function (b) {
     const open = !b.done && isOnTime(b, target, nowTick);
     const row = el("label", { cls: "block" + (b.core ? " isCore" : "") + (b.done ? " off" : "") + (open ? " open" : "") });
@@ -1223,8 +1243,9 @@ function renderToday() {
     if (b.done && !b.onTime) row.appendChild(el("span", { cls: "badge late", text: "늦음" }));
     else if (b.done && b.onTime) row.appendChild(el("span", { cls: "badge ontime", text: "정시" }));
     else if (open) row.appendChild(el("span", { cls: "badge now", text: "지금" }));
-    box.appendChild(row);
+    blocksWrap.appendChild(row);
   });
+  box.appendChild(blocksWrap);
   if (plan.source === "template") {
     if (hasAI()) {
       const errp = el("p", { cls: "err", text: "AI 실패 → 기본 템플릿. 이유: " + (lastAIError || "알 수 없음") });

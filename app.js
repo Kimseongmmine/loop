@@ -117,9 +117,9 @@ function nextPendingTasks(profile, n) {
 const OR_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 // 무료 모델 목록은 수시로 바뀜. orChat이 아래 순서로 자동 시도해 되는 걸 찾음.
 const OR_FREE_MODELS = [
-  "nvidia/nemotron-3.5-lightning:free",
-  "thinkingmachines/inkling:free",
   "poolside/laguna-s-2.1:free",
+  "thinkingmachines/inkling:free",
+  "nvidia/nemotron-3.5-lightning:free",
   "dots-studio/dots-3-note-preview:free",
   "thinkingmachines/inkling-small:free",
   "liquid/lfm-2.5-2.6b:free"
@@ -167,8 +167,10 @@ async function orOnce(key, model, messages, maxTokens) {
   return { ok: true, content: c };
 }
 
-// try the saved model first, then rotate through the free list until one works
-async function orChat(messages, maxTokens) {
+// try the saved model first, then rotate through the free list.
+// `parse` (optional): content -> value|null. A 200 whose content fails to parse
+// is treated as a miss for THAT model, so we rotate to the next one.
+async function orChat(messages, maxTokens, parse) {
   const key = getKey();
   if (!key || typeof fetch === "undefined") { lastAIError = "API 키가 없습니다."; return null; }
   const tried = {};
@@ -177,12 +179,20 @@ async function orChat(messages, maxTokens) {
   });
   let last = "";
   for (let i = 0; i < order.length; i++) {
+    const model = order[i];
     try {
-      const r = await orOnce(key, order[i], messages, maxTokens);
-      if (r.ok) { setModel(order[i]); lastAIError = ""; return r.content; }
-      last = "HTTP " + r.status + " · " + r.error + "  [" + order[i] + "]";
-      // 401/403 = 키/권한 문제 → 다른 모델도 똑같이 실패하므로 즉시 중단
-      if (r.status === 401 || r.status === 403) break;
+      const r = await orOnce(key, model, messages, maxTokens);
+      if (r.ok) {
+        if (parse) {
+          const v = parse(r.content);
+          if (v != null) { setModel(model); lastAIError = ""; return v; }
+          last = "응답을 JSON으로 못 읽음 [" + model + "] · " + String(r.content).replace(/\s+/g, " ").slice(0, 140);
+          continue; // this model replied but not usable JSON → try next
+        }
+        setModel(model); lastAIError = ""; return r.content;
+      }
+      last = "HTTP " + r.status + " · " + r.error + " [" + model + "]";
+      if (r.status === 401 || r.status === 403) break; // 키/권한 → 다른 모델도 무의미
     } catch (e) {
       last = "네트워크 오류 · " + (e && e.message ? e.message : e);
     }
@@ -274,10 +284,10 @@ async function aiBreakdownGoal(goal) {
     (goal.deadline ? ("\n마감: " + goal.deadline) : "") +
     (goal.note ? ("\n메모: " + goal.note) : "") +
     (situation ? ("\n내 상황: " + situation) : "");
-  const txt = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 500);
-  const j = extractJSON(txt);
-  if (j && Array.isArray(j.tasks) && j.tasks.length) {
-    return j.tasks.slice(0, 10).map(function (t) { return { id: genId("t"), text: String(t).slice(0, 60), done: false }; });
+  const parse = function (c) { const j = extractJSON(c); return (j && Array.isArray(j.tasks) && j.tasks.length) ? j.tasks : null; };
+  const tasks = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 500, parse);
+  if (tasks) {
+    return tasks.slice(0, 10).map(function (t) { return { id: genId("t"), text: String(t).slice(0, 60), done: false }; });
   }
   return null;
 }
@@ -298,9 +308,9 @@ async function aiGeneratePlan(candidates) {
     (deadlines ? ("마감 있는 목표:\n" + deadlines + "\n\n") : "") +
     "후보 과제:\n" + (list || "(없음)") +
     "\n\n09~24시 시간표를 JSON으로. 마감 급한 목표를 앞쪽·핵심으로.";
-  const txt = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 900);
-  const j = extractJSON(txt);
-  if (j && Array.isArray(j.blocks)) return mapAIBlocks(j.blocks, candidates);
+  const parse = function (c) { const j = extractJSON(c); return (j && Array.isArray(j.blocks) && j.blocks.length) ? j.blocks : null; };
+  const blocks = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 900, parse);
+  if (blocks) return mapAIBlocks(blocks, candidates);
   return null;
 }
 

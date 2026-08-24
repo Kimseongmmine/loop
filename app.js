@@ -170,6 +170,26 @@ function extractJSON(text) {
   try { return JSON.parse(s.slice(start, end + 1)); } catch (e) { return null; }
 }
 
+// parse a task list from a model reply: JSON {tasks:[...]} OR a plain numbered/bulleted list.
+// small free models produce lists far more reliably than JSON.
+function parseTaskList(content) {
+  const j = extractJSON(content);
+  if (j && Array.isArray(j.tasks) && j.tasks.length) {
+    return j.tasks.map(function (t) { return String(t).trim(); }).filter(Boolean);
+  }
+  const raw = String(content || "").split("\n");
+  const marker = /^\s*(?:[-*•]|\d+[\.\)])\s+/;
+  // prefer lines that carry a list marker; drop the marker + wrapping quotes
+  const marked = raw.filter(function (l) { return marker.test(l); })
+    .map(function (l) { return l.replace(marker, "").replace(/^["'`]+|["'`,]+$/g, "").trim(); })
+    .filter(function (l) { return l.length >= 2 && l.length <= 80; });
+  if (marked.length >= 3) return marked;
+  // fallback: plain lines, dropping colon-ending preambles and bracket/JSON noise
+  const plain = raw.map(function (l) { return l.trim(); })
+    .filter(function (l) { return l.length >= 2 && l.length <= 80 && !/[:：]$/.test(l) && !/^[{}\[\]]/.test(l); });
+  return plain.length >= 3 ? plain : null;
+}
+
 let lastAIError = "";
 
 async function orOnce(key, model, messages, maxTokens) {
@@ -305,17 +325,20 @@ function setBlockDone(date, blockId, checked) {
 
 // ---- AI flows ----
 async function aiBreakdownGoal(goal) {
-  const sys = "너는 학습 코치다. 주어진 목표를 60분 안에 하나씩 끝낼 수 있는 아주 구체적인 실행 과제 5~8개로 쪼갠다. " +
-    "순서대로, 작고 명확하게. 한국어. 오직 JSON만 출력: {\"tasks\":[\"과제1\",\"과제2\"]}";
+  const sys = "너는 학습 코치다. 목표를 '실제로 완수하려면 뭘 해야 하는지' 구체적 실행 과제로 쪼갠다. " +
+    "규칙: 각 과제는 한 번에 60분 안에 끝낼 수 있어야 하고, '무엇을 얼마나' 명확해야 한다. " +
+    "추상적 표현 금지('공부하기','정리하기','복습하기' 같은 것 금지). " +
+    "구체적으로('3장 연습문제 1~10번 풀기','1강 강의 듣고 필기 2쪽','기출 2회분 채점까지'). " +
+    "5~8개, 쉬운 것부터 순서대로. 한국어. 번호 목록으로, 한 줄에 하나씩만 출력. 설명·인사 금지.";
   const traits = (loadProfile().traits || "").trim();
   const usr = "목표: " + goal.title +
     (goal.deadline ? ("\n마감: " + goal.deadline) : "") +
     (goal.note ? ("\n메모: " + goal.note) : "") +
-    (traits ? ("\n내 특성: " + traits) : "");
-  const parse = function (c) { const j = extractJSON(c); return (j && Array.isArray(j.tasks) && j.tasks.length) ? j.tasks : null; };
-  const tasks = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 500, parse);
-  if (tasks) {
-    return tasks.slice(0, 10).map(function (t) { return { id: genId("t"), text: String(t).slice(0, 60), done: false }; });
+    (traits ? ("\n내 특성(참고): " + traits) : "") +
+    "\n\n이 목표를 완수하기 위한 구체적 과제 목록:";
+  const list = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 500, parseTaskList);
+  if (list) {
+    return list.slice(0, 10).map(function (t) { return { id: genId("t"), text: String(t).slice(0, 70), done: false }; });
   }
   return null;
 }
@@ -341,6 +364,27 @@ async function aiGeneratePlan(candidates) {
 
 // on-demand plan generation for a target date. shows loading, falls back to template.
 let generating = false;
+let breaking = null; // goalId currently being broken down by AI
+
+async function breakdownGoalNow(goalId) {
+  if (breaking) return;
+  const profile = loadProfile();
+  const goal = findGoal(profile, goalId);
+  if (!goal) return;
+  breaking = goalId;
+  render();
+  try {
+    const tasks = await aiBreakdownGoal(goal);
+    if (tasks) {
+      const p = loadProfile();
+      const g = findGoal(p, goalId);
+      if (g) { g.tasks = (g.tasks || []).concat(tasks); g.analyzedAt = new Date().toISOString(); saveProfile(p); }
+    }
+  } catch (e) {} finally {
+    breaking = null;
+    render();
+  }
+}
 async function generatePlan(targetDate) {
   if (generating) return;
   generating = true;
@@ -572,9 +616,18 @@ function renderSettings() {
     addRow.appendChild(ti); addRow.appendChild(ta);
     gv.appendChild(addRow);
 
-    if (!g.tasks || !g.tasks.length) {
-      const hint = el("span", { cls: "muted", text: getKey() ? "새로고침하면 AI가 과제로 분해합니다." : "과제를 직접 추가하거나, 아래 AI를 켜세요." });
-      gv.appendChild(hint);
+    // AI breakdown button (generate concrete homework for this goal)
+    if (getKey()) {
+      if (breaking === g.id) {
+        gv.appendChild(el("span", { cls: "muted", text: "AI가 과제로 쪼개는 중…" }));
+      } else {
+        const bd = el("button", { cls: "mini bd", text: "🧩 AI로 과제 쪼개기" });
+        bd.disabled = !!breaking;
+        bd.addEventListener("click", function () { breakdownGoalNow(g.id); });
+        gv.appendChild(bd);
+      }
+    } else if (!g.tasks || !g.tasks.length) {
+      gv.appendChild(el("span", { cls: "muted", text: "과제를 직접 추가하거나, 아래에서 AI를 켜세요." }));
     }
     box.appendChild(gv);
   });
@@ -634,7 +687,8 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
-    templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile
+    templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
+    parseTaskList, breakdownGoalNow
   };
 }
 

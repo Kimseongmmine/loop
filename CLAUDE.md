@@ -18,6 +18,12 @@
 - 저장 localStorage만. 서버 없음. Vercel 정적 배포
 - AI: OpenRouter 무료 모델. 키는 localStorage "loop.or_key"에만(코드·깃 미포함)
 
+## v1.3 (AI 신뢰성 + 목표 쪼개기 + 밝은 테마)
+- AI 목표 쪼개기: JSON 대신 **번호/불릿 목록**으로 받아 parseTaskList로 파싱(작은 무료모델이 목록은 잘 만듦). 프리앰블/콜론줄 제거. JSON도 여전히 허용
+- 프롬프트 조임: 추상적 과제('공부하기') 금지, 구체적('3장 1-10번 풀기') 요구
+- 목표 카드에 "🧩 AI로 과제 쪼개기" 버튼(breakdownGoalNow, breaking 로딩플래그)
+- 디자인: **라이트 테마**(흰 카드, 파란 포인트 #2563eb, 카드형 섹션). theme-color/manifest도 라이트로
+
 ## 프로필 양식 (v1.2)
 - `loop.profile`에 카테고리 텍스트 필드: `fixed`(고정일정), `rhythm`(하루리듬), `traits`(특성), `prefs`(선호). 전부 선택.
 - 구버전 `situation` → `traits` 자동 마이그레이션(loadProfile)

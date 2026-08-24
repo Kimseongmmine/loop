@@ -187,6 +187,35 @@ function renderNightInput(root, target, initial) {
   root.appendChild(btn);
 }
 
+// ---- rule 1: auto-copy (pure decision) ----
+// returns the record that should exist for `today`, or null if no history to carry.
+function carryRecord(days, today, now) {
+  const existing = getDay(days, today);
+  if (existing) return existing;
+  const recent = mostRecentBefore(days, today);
+  if (!recent) return null;
+  return {
+    date: today,
+    task: recent.task,
+    planned_at: now.toISOString(),
+    started_at: null,
+    completed: false,
+    source: "carried",
+    away_ms: 0
+  };
+}
+
+// materialize today's record (creating a carried one if needed)
+function ensureToday(now) {
+  const today = todayStr(now);
+  const days = loadDays();
+  const existing = getDay(days, today);
+  if (existing) return existing;
+  const rec = carryRecord(days, today, now);
+  if (rec) upsertDay(rec);
+  return rec;
+}
+
 // ---- morning ----
 function markCompleted(date) {
   const days = loadDays();
@@ -195,9 +224,10 @@ function markCompleted(date) {
 }
 
 function renderMorning(root) {
-  const today = todayStr();
-  const record = getDay(loadDays(), today);
-  const state = morningState(record, new Date());
+  const now = new Date();
+  const today = todayStr(now);
+  const record = ensureToday(now); // rule 1: never empty when history exists
+  const state = morningState(record, now);
 
   if (state.mode === "empty") {
     root.appendChild(el("p", { text: "", cls: "task" }));
@@ -237,7 +267,34 @@ function renderMorning(root) {
 
 // ---- exports for node tests (no effect in browser) ----
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { nightView, currentScreen, todayStr, tomorrowStr, mostRecentBefore, getDay, morningState, remainingMs, fmtMMSS, DURATION_MS };
+  module.exports = { nightView, currentScreen, todayStr, tomorrowStr, mostRecentBefore, getDay, morningState, remainingMs, fmtMMSS, DURATION_MS, carryRecord };
 }
 
-if (typeof document !== "undefined") render();
+// ---- rule 2: measure (never display) time away during a running timer ----
+let hiddenAt = null;
+
+function onHide() {
+  const rec = getDay(loadDays(), todayStr());
+  if (rec && rec.started_at && !rec.completed) hiddenAt = Date.now();
+}
+
+function onShow() {
+  if (hiddenAt != null) {
+    const delta = Date.now() - hiddenAt;
+    hiddenAt = null;
+    const days = loadDays();
+    const rec = getDay(days, todayStr());
+    if (rec && rec.started_at && !rec.completed) {
+      rec.away_ms = (rec.away_ms || 0) + delta;
+      upsertDay(rec);
+    }
+  }
+  render(); // time-based timer catches up; may transition to completed
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) onHide(); else onShow();
+  });
+  render();
+}

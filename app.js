@@ -174,8 +174,52 @@ function extractJSON(text) {
   if (fence) s = fence[1];
   const start = s.indexOf("{");
   const end = s.lastIndexOf("}");
-  if (start === -1 || end === -1 || end < start) return null;
-  try { return JSON.parse(s.slice(start, end + 1)); } catch (e) { return null; }
+  if (start === -1 || end === -1 || end < start) return repairTruncatedJSON(s);
+  try { return JSON.parse(s.slice(start, end + 1)); } catch (e) { return repairTruncatedJSON(s); }
+}
+
+// The model hit its output limit mid-JSON. Salvage every COMPLETE object inside
+// the first array we find (e.g. {"blocks":[{...},{...},{"time":"08:00-  <-- cut).
+function repairTruncatedJSON(text) {
+  const s = String(text || "");
+  const keyMatch = s.match(/"(blocks|tasks|schedule)"\s*:\s*\[/);
+  const arrStart = keyMatch ? s.indexOf("[", s.indexOf(keyMatch[0])) : s.indexOf("[");
+  if (arrStart === -1) return null;
+  const items = [];
+  let depth = 0, objStart = -1, inStr = false, esc = false;
+  for (let i = arrStart; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === "{") { if (depth === 0) objStart = i; depth++; continue; }
+    if (ch === "}") {
+      depth--;
+      if (depth === 0 && objStart !== -1) {
+        try { items.push(JSON.parse(s.slice(objStart, i + 1))); } catch (e) {}
+        objStart = -1;
+      }
+      continue;
+    }
+    if (ch === "]" && depth === 0) break;
+  }
+  if (!items.length) {
+    // maybe it was an array of plain strings: ["a","b","c
+    const strs = s.slice(arrStart).match(/"([^"\\]|\\.)*"/g);
+    if (strs && strs.length >= 3) {
+      const vals = strs.map(function (x) { try { return JSON.parse(x); } catch (e) { return null; } }).filter(Boolean);
+      if (vals.length >= 3) return keyMatch && keyMatch[1] === "tasks" ? { tasks: vals } : null;
+    }
+    return null;
+  }
+  const key = keyMatch ? keyMatch[1] : "blocks";
+  const out = {};
+  out[key] = items;
+  return out;
 }
 
 // parse a task list from a model reply: JSON {tasks:[...]} OR a plain numbered/bulleted list.
@@ -259,7 +303,7 @@ async function orOnce(key, model, messages, maxTokens) {
       "HTTP-Referer": "https://kimseongmmine.github.io/loop/",
       "X-Title": "LOOP"
     },
-    body: JSON.stringify({ model: model, max_tokens: maxTokens || 800, temperature: 0.6, messages: messages })
+    body: JSON.stringify({ model: model, max_tokens: maxTokens || 2048, temperature: 0.6, messages: messages })
   });
   if (!res.ok) {
     let body = ""; try { body = await res.text(); } catch (e) {}
@@ -315,7 +359,7 @@ async function geminiChat(messages, maxTokens, parse) {
   const sys = messages.filter(function (m) { return m.role === "system"; }).map(function (m) { return m.content; }).join("\n");
   const userParts = messages.filter(function (m) { return m.role !== "system"; }).map(function (m) { return { text: m.content }; });
   const url = "https://generativelanguage.googleapis.com/v1beta/models/" + getGemModel() + ":generateContent?key=" + encodeURIComponent(key);
-  const body = { contents: [{ role: "user", parts: userParts }], generationConfig: { maxOutputTokens: maxTokens || 900, temperature: 0.6 } };
+  const body = { contents: [{ role: "user", parts: userParts }], generationConfig: { maxOutputTokens: maxTokens || 4096, temperature: 0.6 } };
   // force clean JSON output when the caller expects to parse it (no preamble / reasoning text)
   if (parse) body.generationConfig.responseMimeType = "application/json";
   if (sys) body.system_instruction = { parts: [{ text: sys }] };
@@ -435,7 +479,7 @@ async function aiBreakdownGoal(goal) {
     (goal.note ? ("\n메모: " + goal.note) : "") +
     (traits ? ("\n내 특성(참고): " + traits) : "") +
     "\n\n이 목표를 완수하기 위한 구체적 과제 목록:";
-  const list = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 500, parseTaskList);
+  const list = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 1500, parseTaskList);
   if (list) {
     return list.slice(0, 10).map(function (t) { return { id: genId("t"), text: String(t).slice(0, 70), done: false }; });
   }
@@ -466,7 +510,7 @@ async function aiGeneratePlan(candidates) {
     }
     return parseTextSchedule(c, candidates);
   };
-  const blocks = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 1200, parse);
+  const blocks = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 4096, parse);
   if (blocks) return mapAIBlocks(blocks, candidates);
   return null;
 }
@@ -814,7 +858,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON
   };
 }
 

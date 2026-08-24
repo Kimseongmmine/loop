@@ -27,6 +27,7 @@ h2 {
 }
 
 .muted { color: #6b6b6b; font-size: 13px; }
+.err { color: #ff6b6b; font-size: 13px; line-height: 1.5; word-break: break-all; }
 
 /* header */
 .hdr { display: flex; flex-direction: column; gap: 10px; }

@@ -115,7 +115,8 @@ function nextPendingTasks(profile, n) {
 
 // ---- OpenRouter plumbing (reused from v0) ----
 const OR_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
-const OR_DEFAULT_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
+// 무료 모델 목록은 수시로 바뀜. 실패 시 설정의 "모델 변경"으로 교체 가능.
+const OR_DEFAULT_MODEL = "nvidia/nemotron-3.5-lightning:free";
 function getKey() { try { return localStorage.getItem(K_ORKEY) || ""; } catch (e) { return ""; } }
 function setKey(k) { try { localStorage.setItem(K_ORKEY, k); } catch (e) {} }
 function getModel() { try { return localStorage.getItem(K_ORMODEL) || OR_DEFAULT_MODEL; } catch (e) { return OR_DEFAULT_MODEL; } }
@@ -132,19 +133,35 @@ function extractJSON(text) {
   try { return JSON.parse(s.slice(start, end + 1)); } catch (e) { return null; }
 }
 
+let lastAIError = "";
 async function orChat(messages, maxTokens) {
   const key = getKey();
-  if (!key || typeof fetch === "undefined") return null;
+  if (!key || typeof fetch === "undefined") { lastAIError = "API 키가 없습니다."; return null; }
   try {
     const res = await fetch(OR_ENDPOINT, {
       method: "POST",
-      headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json" },
+      headers: {
+        "Authorization": "Bearer " + key,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://kimseongmmine.github.io/loop/",
+        "X-Title": "LOOP"
+      },
       body: JSON.stringify({ model: getModel(), max_tokens: maxTokens || 800, temperature: 0.6, messages: messages })
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      let body = "";
+      try { body = await res.text(); } catch (e) {}
+      let msg = body;
+      try { const j = JSON.parse(body); msg = (j.error && (j.error.message || j.error.code)) || body; } catch (e) {}
+      lastAIError = "HTTP " + res.status + " · " + String(msg).slice(0, 220);
+      return null;
+    }
     const data = await res.json();
-    return (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || null;
-  } catch (e) { return null; }
+    const c = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+    if (!c) { lastAIError = "빈 응답 · " + JSON.stringify(data).slice(0, 220); return null; }
+    lastAIError = "";
+    return c;
+  } catch (e) { lastAIError = "네트워크 오류 · " + (e && e.message ? e.message : e); return null; }
 }
 
 // ---- plan building (pure) ----
@@ -408,7 +425,11 @@ function renderToday() {
     box.appendChild(row);
   });
   if (plan.source === "template") {
-    box.appendChild(el("p", { cls: "muted", text: getKey() ? "AI 응답 실패로 기본 템플릿입니다. 다시 생성해 보세요." : "AI 없이 기본 템플릿입니다. 설정에서 AI를 켜면 맞춤 계획이 됩니다." }));
+    if (getKey()) {
+      box.appendChild(el("p", { cls: "err", text: "AI 실패 → 기본 템플릿. 이유: " + (lastAIError || "알 수 없음") }));
+    } else {
+      box.appendChild(el("p", { cls: "muted", text: "AI 없이 기본 템플릿입니다. 설정에서 AI를 켜면 맞춤 계획이 됩니다." }));
+    }
   }
   box.appendChild(genButton(target, "다시 생성"));
   return box;
@@ -514,7 +535,22 @@ function renderSettings() {
     });
     box.appendChild(kl);
   } else {
-    box.appendChild(el("span", { cls: "muted", text: "AI 켜짐 · 모델: " + getModel() }));
+    const mrow = el("div", { cls: "addrow" });
+    mrow.appendChild(el("span", { cls: "muted", text: "AI 켜짐 · 모델: " + getModel() }));
+    const mc = el("button", { cls: "mini", text: "모델 변경" });
+    mc.addEventListener("click", function () {
+      const cur = getModel();
+      const v = window.prompt("OpenRouter 모델 id (무료는 :free로 끝남):", cur);
+      if (v && v.trim()) { try { localStorage.setItem(K_ORMODEL, v.trim()); } catch (e) {} render(); }
+    });
+    mrow.appendChild(mc);
+    const kc = el("button", { cls: "mini", text: "키 변경" });
+    kc.addEventListener("click", function () {
+      const v = window.prompt("OpenRouter API 키 (sk-or-...):", "");
+      if (v && v.trim()) { setKey(v.trim()); render(); }
+    });
+    mrow.appendChild(kc);
+    box.appendChild(mrow);
   }
   return box;
 }

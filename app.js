@@ -230,7 +230,23 @@ function renderMorning(root) {
   const state = morningState(record, now);
 
   if (state.mode === "empty") {
-    root.appendChild(el("p", { text: "", cls: "task" }));
+    // first-ever run: nothing to carry yet -> allow planning today's one thing now
+    root.appendChild(el("p", { text: "오늘 오전", cls: "label" }));
+    const input = el("input", { cls: "input" });
+    input.type = "text";
+    input.placeholder = "오늘 오전: ____ 60분";
+    input.autofocus = true;
+    const btn = el("button", { text: "확정", cls: "confirm" });
+    function submit() {
+      const task = input.value.trim();
+      if (!task) return;
+      confirmTask(today, task, new Date());
+      render();
+    }
+    btn.addEventListener("click", submit);
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") submit(); });
+    root.appendChild(input);
+    root.appendChild(btn);
     return;
   }
   if (state.mode === "done") {

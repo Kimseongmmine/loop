@@ -726,6 +726,13 @@ function renderHero() {
   box.appendChild(eWrap);
 
   box.appendChild(genButton(target, plan ? "계획 다시 생성" : (isTomorrow ? "내일 계획 생성" : "오늘 계획 생성")));
+
+  // 오늘의 한 마디
+  const q = quoteFor(todayStr(now));
+  const qbox = el("blockquote", { cls: "quote" });
+  qbox.appendChild(el("span", { cls: "qtext", text: q.t }));
+  if (q.a) qbox.appendChild(el("span", { cls: "qauth", text: "— " + q.a }));
+  box.appendChild(qbox);
   return box;
 }
 
@@ -1019,7 +1026,75 @@ function renderSettings() {
     mrow.appendChild(mc);
   }
   if (mrow.children.length) box.appendChild(mrow);
+  box.appendChild(renderTimeline());
   return box;
+}
+
+// ---- 대운 타임라인 (긴 호흡의 앵커; 접어둠) ----
+const BIRTH_YEAR = 2002;
+const LUCK_CYCLES = [
+  { from: 1, gz: "丁未", note: "유년" },
+  { from: 11, gz: "戊申", note: "土金 시작 — 틀이 생기던 시기" },
+  { from: 21, gz: "己酉", note: "金 채우는 구간 — 자격·실무·조직 경험을 쌓을 때" },
+  { from: 31, gz: "庚戌", note: "金 완성 — 그릇이 단단해지고 결과가 붙기 시작" },
+  { from: 41, gz: "辛亥", note: "전환점 — 金生水, 흐름이 바뀌는 지점" },
+  { from: 51, gz: "壬子", note: "정점 — 용신 水 최대. 물 만난 나무" },
+  { from: 61, gz: "癸丑", note: "水 지속 — 안정 구간" },
+  { from: 71, gz: "甲寅", note: "木 회복" },
+  { from: 81, gz: "乙卯", note: "木 왕성" },
+  { from: 91, gz: "丙辰", note: "말년" }
+];
+
+function currentAge(now) { return (now || new Date()).getFullYear() - BIRTH_YEAR; }
+function currentCycle(age) {
+  let cur = LUCK_CYCLES[0];
+  for (let i = 0; i < LUCK_CYCLES.length; i++) { if (age >= LUCK_CYCLES[i].from) cur = LUCK_CYCLES[i]; }
+  return cur;
+}
+
+function renderTimeline() {
+  const box = el("details", { cls: "arch tl" });
+  const age = currentAge(new Date());
+  const cur = currentCycle(age);
+  box.appendChild(el("summary", { text: "🧭 긴 호흡 — 지금 어디쯤인가 (" + age + "세 · " + cur.gz + ")" }));
+  box.appendChild(el("p", {
+    cls: "muted",
+    text: "자수성가·대기만성 구조. 없는 金(그릇)과 부족한 水(에너지)를 대운이 순서대로 채워주는 우상향 흐름입니다. " +
+      "지금 당장 안 풀려도 축적 구간이라 그렇습니다. 41세에 전환, 51~60이 정점."
+  }));
+  LUCK_CYCLES.filter(function (c) { return c.from >= 11 && c.from <= 61; }).forEach(function (c) {
+    const on = c.from === cur.from;
+    const row = el("div", { cls: "trow" + (on ? " now" : "") });
+    row.appendChild(el("span", { cls: "tage", text: c.from + "세" }));
+    row.appendChild(el("span", { cls: "tgz", text: c.gz }));
+    row.appendChild(el("span", { cls: "tnote", text: c.note }));
+    box.appendChild(row);
+  });
+  box.appendChild(el("p", { cls: "muted", text: "사주는 성향의 지도이지 확정된 미래가 아닙니다. 지금 쌓는 것이 그 지도를 바꿉니다." }));
+  return box;
+}
+
+// ---- 오늘의 한 마디 (날짜 고정 로테이션) ----
+const QUOTES = [
+  { t: "시작이 반이라는 말은 과장이 아니다. 시작하지 않은 일은 0이다.", a: "" },
+  { t: "완벽한 하루를 기다리다 아무 날도 쓰지 못한다.", a: "" },
+  { t: "천천히 가는 것을 두려워 말고, 멈춰 서는 것을 두려워하라.", a: "중국 속담" },
+  { t: "동기는 시작한 뒤에 따라온다. 먼저 움직여라.", a: "" },
+  { t: "매일 조금씩 하는 사람을 몰아치는 사람이 이길 수 없다.", a: "" },
+  { t: "큰 그릇은 늦게 만들어진다.", a: "노자 · 대기만성" },
+  { t: "오늘 할 수 있는 최소한을 하라. 그게 내일의 나를 만든다.", a: "" },
+  { t: "재능은 시작하게 하고, 습관은 끝내게 한다.", a: "" },
+  { t: "지치는 건 약해서가 아니라 배터리가 작아서다. 나눠 써라.", a: "" },
+  { t: "끝까지 해본 경험 하나가 자신감의 전부를 바꾼다.", a: "" },
+  { t: "물이 바위를 뚫는 것은 힘이 아니라 반복이다.", a: "" },
+  { t: "하루를 잘 보내는 법은 하나만 정해서 그것만 하는 것이다.", a: "" },
+  { t: "미루는 것은 게으름이 아니라, 시작 장벽이 높다는 신호다.", a: "" },
+  { t: "실패한 날을 세지 말고, 다시 시작한 날을 세라.", a: "" }
+];
+function quoteFor(dateString) {
+  const p = String(dateString).split("-").map(Number);
+  const key = p[0] * 372 + p[1] * 31 + p[2];
+  return QUOTES[key % QUOTES.length];
 }
 
 // bootstrap: record visit, render. Plan is generated only on button press.
@@ -1034,7 +1109,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge
   };
 }
 

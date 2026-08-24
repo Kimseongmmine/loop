@@ -115,11 +115,20 @@ function nextPendingTasks(profile, n) {
 
 // ---- OpenRouter plumbing (reused from v0) ----
 const OR_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
-// 무료 모델 목록은 수시로 바뀜. 실패 시 설정의 "모델 변경"으로 교체 가능.
-const OR_DEFAULT_MODEL = "nvidia/nemotron-3.5-lightning:free";
+// 무료 모델 목록은 수시로 바뀜. orChat이 아래 순서로 자동 시도해 되는 걸 찾음.
+const OR_FREE_MODELS = [
+  "nvidia/nemotron-3.5-lightning:free",
+  "thinkingmachines/inkling:free",
+  "poolside/laguna-s-2.1:free",
+  "dots-studio/dots-3-note-preview:free",
+  "thinkingmachines/inkling-small:free",
+  "liquid/lfm-2.5-2.6b:free"
+];
+const OR_DEFAULT_MODEL = OR_FREE_MODELS[0];
 function getKey() { try { return localStorage.getItem(K_ORKEY) || ""; } catch (e) { return ""; } }
 function setKey(k) { try { localStorage.setItem(K_ORKEY, k); } catch (e) {} }
 function getModel() { try { return localStorage.getItem(K_ORMODEL) || OR_DEFAULT_MODEL; } catch (e) { return OR_DEFAULT_MODEL; } }
+function setModel(m) { try { localStorage.setItem(K_ORMODEL, m); } catch (e) {} }
 
 // tolerant JSON extraction from a model reply (handles ```json fences, prose around it)
 function extractJSON(text) {
@@ -134,34 +143,52 @@ function extractJSON(text) {
 }
 
 let lastAIError = "";
+
+async function orOnce(key, model, messages, maxTokens) {
+  const res = await fetch(OR_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + key,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://kimseongmmine.github.io/loop/",
+      "X-Title": "LOOP"
+    },
+    body: JSON.stringify({ model: model, max_tokens: maxTokens || 800, temperature: 0.6, messages: messages })
+  });
+  if (!res.ok) {
+    let body = ""; try { body = await res.text(); } catch (e) {}
+    let msg = body;
+    try { const j = JSON.parse(body); msg = (j.error && (j.error.message || j.error.code)) || body; } catch (e) {}
+    return { ok: false, status: res.status, error: String(msg).slice(0, 220) };
+  }
+  const data = await res.json();
+  const c = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  if (!c) return { ok: false, status: 200, error: "빈 응답 · " + JSON.stringify(data).slice(0, 200) };
+  return { ok: true, content: c };
+}
+
+// try the saved model first, then rotate through the free list until one works
 async function orChat(messages, maxTokens) {
   const key = getKey();
   if (!key || typeof fetch === "undefined") { lastAIError = "API 키가 없습니다."; return null; }
-  try {
-    const res = await fetch(OR_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Authorization": "Bearer " + key,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://kimseongmmine.github.io/loop/",
-        "X-Title": "LOOP"
-      },
-      body: JSON.stringify({ model: getModel(), max_tokens: maxTokens || 800, temperature: 0.6, messages: messages })
-    });
-    if (!res.ok) {
-      let body = "";
-      try { body = await res.text(); } catch (e) {}
-      let msg = body;
-      try { const j = JSON.parse(body); msg = (j.error && (j.error.message || j.error.code)) || body; } catch (e) {}
-      lastAIError = "HTTP " + res.status + " · " + String(msg).slice(0, 220);
-      return null;
+  const tried = {};
+  const order = [getModel()].concat(OR_FREE_MODELS).filter(function (m) {
+    if (!m || tried[m]) return false; tried[m] = true; return true;
+  });
+  let last = "";
+  for (let i = 0; i < order.length; i++) {
+    try {
+      const r = await orOnce(key, order[i], messages, maxTokens);
+      if (r.ok) { setModel(order[i]); lastAIError = ""; return r.content; }
+      last = "HTTP " + r.status + " · " + r.error + "  [" + order[i] + "]";
+      // 401/403 = 키/권한 문제 → 다른 모델도 똑같이 실패하므로 즉시 중단
+      if (r.status === 401 || r.status === 403) break;
+    } catch (e) {
+      last = "네트워크 오류 · " + (e && e.message ? e.message : e);
     }
-    const data = await res.json();
-    const c = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-    if (!c) { lastAIError = "빈 응답 · " + JSON.stringify(data).slice(0, 220); return null; }
-    lastAIError = "";
-    return c;
-  } catch (e) { lastAIError = "네트워크 오류 · " + (e && e.message ? e.message : e); return null; }
+  }
+  lastAIError = last;
+  return null;
 }
 
 // ---- plan building (pure) ----
@@ -427,6 +454,7 @@ function renderToday() {
   if (plan.source === "template") {
     if (getKey()) {
       box.appendChild(el("p", { cls: "err", text: "AI 실패 → 기본 템플릿. 이유: " + (lastAIError || "알 수 없음") }));
+      box.appendChild(el("p", { cls: "muted", text: "해결: ① openrouter.ai → Settings → Privacy에서 무료 모델(prompt logging) 허용 켜기  ② 안 되면 설정에서 키/모델 변경" }));
     } else {
       box.appendChild(el("p", { cls: "muted", text: "AI 없이 기본 템플릿입니다. 설정에서 AI를 켜면 맞춤 계획이 됩니다." }));
     }

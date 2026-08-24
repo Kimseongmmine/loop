@@ -1,67 +1,51 @@
 # LOOP — 프로젝트 기록 (CLAUDE.md)
 
-## 무엇
-전날 밤에 "내일 오전에 할 단 하나"를 확정해서, 아침엔 선택할 것이 없게 만드는 개인용 단일 페이지 PWA.
-할 일 관리 앱이 아니다. **하루 항목은 오직 하나.**
+## 무엇 (v1)
+접속하면 AI가 내 목표를 분석해 오늘 하루(9~24시) 시간표를 짜주고, 목표별 진행도 + 접속 스트릭을 보여주는 개인 대시보드 PWA.
 
 ## 왜 (사용자 맥락)
-관성(스스로 시작·지속하는 회로)이 약해, 아침에 "뭘 할지 고르는 선택" 자체가 실패 지점.
-그래서 선택을 전날 밤으로 옮기고, 아침엔 이미 정해진 하나만 실행한다.
-**범위 확장이 이 프로젝트의 유일한 실패 요인.** 스펙 밖 기능 제안·추가 금지.
+매일 "뭘 할지" 정하는 결정 자체가 실패 지점(관성 약함). 그 결정을 AI에게 넘긴다.
+빽빽한 15시간 계획은 1일차 포기 → **핵심 3개만 하면 성공**(무너짐 방지)이 핵심 장치.
+강제성은 접속 스트릭만(사람·돈·잔소리 전부 사용자가 거부).
 
 ## 스택 (변경 금지)
-- 바닐라 JS + HTML + CSS. 빌드 도구·프레임워크·의존성 0
-- 파일 4개만: index.html / app.js / style.css / manifest.json
-- 저장은 localStorage만. 서버·DB·계정·로그인 없음
-- Vercel 정적 배포
+- 바닐라 JS + HTML + CSS. 빌드도구·프레임워크·의존성 0
+- 파일 4개: index.html / app.js / style.css / manifest.json (+ 저장소 문서 README/CLAUDE.md, 아이콘 png)
+- 저장 localStorage만. 서버 없음. Vercel 정적 배포
+- AI: OpenRouter 무료 모델. 키는 localStorage "loop.or_key"에만(코드·깃 미포함)
 
-## 데이터 모델
-localStorage 키 `"loop.days"` = day 객체 배열.
-```
-day = {
-  date, task, planned_at, started_at|null, completed(bool),
-  source: "manual"|"carried", away_ms(number)
-}
-```
+## 데이터 모델 (localStorage)
+- `loop.profile` = { goals:[ { id, title, note, tasks:[{id,text,done}], analyzedAt } ] }
+  - 진행도 = done/total (goalProgress)
+- `loop.plans` = { "YYYY-MM-DD": { blocks:[{id,time,text,goalId,taskId,core,done}], generatedAt, source:"template"|"ai" } }
+  - 학습 블록은 goalId+taskId 보유, 체크 시 해당 task 완료 → 진행도 연동. 생활 블록은 null
+- `loop.visits` = ["YYYY-MM-DD"] → 스트릭(오늘부터 역순 연속) + 접속 점그리드
 
-## 핵심 규칙
-- 화면 분기: 21:00~03:59 밤 / 04:00~20:59 아침. 탭·메뉴·라우팅 없음
-- 밤: 대상=내일(D+1), 입력 1 + 확정 1. 확정 후 잠금. 수정은 23:59까지, 00:00 이후 불가
-- 자정~03:59: 하드 잠금, 다가올 오전 task **읽기전용 한 줄**만 (오늘 레코드 없으면 최근 것 = carried 될 것). carried 여부 미표시
-- 아침: task 한 줄 크게 + "시작" 1개. started_at 기록 후 60분 카운트다운(mm:ss). 60분 경과 → completed 자동. 시작 안 하고 날 지나면 미완료 영구 확정
-- 규칙1 자동복사: 아침에 오늘 레코드 없으면 최근 task를 source:"carried"로 생성. 빈 화면 절대 없음
-- 규칙2 타이머: 남은시간 = 항상 `now - started_at`(setInterval 누적 신뢰 안 함). 화면 이탈해도 시간은 흐름. visibilitychange로 away_ms 누적(화면 미표시). 60분 차면 away_ms 무관 completed=true
+## 동작
+- boot: 오늘 방문 기록 → 템플릿 계획 즉시 생성 → 렌더 → (키 있으면) aiEnhance 비동기
+- aiEnhance: 과제 없는 목표를 AI로 분해(A) + 손대지 않은 템플릿을 AI 계획(B)으로 교체
+- 손대지 않은 템플릿은 목표/과제 추가 시 즉시 갱신(refreshTemplateIfUntouched)
+- 무키/실패/깨진 JSON → 고정 템플릿 시간표로 폴백. 앱 안 깨짐
 
-## 절대 넣지 말 것
-소급입력·과거수정·완료취소 / 알림·푸시·사운드·진동 / 통계·그래프·streak·달력·히트맵·진행률바 / 카테고리·태그·우선순위·하위할일·복수task / 날짜이동·목록뷰 / 설정·다크모드토글·온보딩·도움말·애니메이션 / 응원·격려·이모지 / 로그인·동기화·내보내기 / 서비스워커·오프라인캐시
+## 핵심 함수 (app.js)
+- 순수: computeStreak, visitGrid, goalProgress, nextPendingTasks, templatePlan, mapAIBlocks, coreStatus, extractJSON
+- AI: orChat, aiBreakdownGoal(A), aiGeneratePlan(B), aiEnhance
+- 렌더: renderHeader/renderProgress/renderToday/renderSettings
 
-## UI 톤
-배경 #0b0b0b, 흰 글자. 시스템 폰트, 타이머만 monospace. 한 화면 요소 3개 이하. 장식 없음. 감탄사·물음표 금지.
+## 작업 순서 (v1 — 전부 완료)
+1. [x] 데이터 계층(profile/plans/visits, 스트릭·진행도) + 유닛테스트
+2. [x] 대시보드 골격(헤더·스트릭 그리드·진행도)
+3. [x] 설정: 목표/과제 CRUD·수동 체크
+4. [x] AI 배관(분해 A·계획 B·관대 파서·템플릿 폴백)
+5. [x] 오늘 계획 렌더·핵심3·체크→진행도 연동
+6. [x] style.css 대시보드
+7. [x] README/CLAUDE.md 갱신
 
-## 작업 순서 (커밋 단계마다 1개, 영어 한 줄)
-1. [x] index.html 골격 + storage 유틸 + 시각 분기
-2. [x] 밤 화면: 입력·확정·잠금·23:59 마감·자정 후 읽기전용
-3. [x] 아침 화면: task 표시·시작·시각기준 60분 타이머·완료
-4. [x] 규칙1 자동복사 + 규칙2 away_ms 계측
-5. [x] style.css 정리
-6. [x] PWA manifest (서비스워커 없음)
-7. [x] README 5줄
-
-## 상태: v0 완성 (전 단계 테스트 통과)
-- 순수 로직 유닛테스트 + 헤드리스 DOM 배선 테스트 + 정적 서빙 200 확인 완료
-- 배포: 폴더째 Vercel에 올리면 끝 (빌드 설정 불필요)
-
-## 추가 기능 — 추천(제안) 채우기 (스펙의 "제안 금지/설정 금지"를 사용자가 의도적으로 뒤집음)
-이유: 빈 입력창=결정 요구=실패 지점. 그래서 입력창을 절대 비워두지 않는다.
-- 1차: 고정 프리셋(PRESETS 5개) 날짜별 결정적 배정 → 즉시·오프라인·무키 동작
-- 2차(선택): OpenRouter 무료 모델로 그날 상태 기반 맞춤 추천
-  - 엔드포인트 OR_ENDPOINT, 기본모델 OR_DEFAULT_MODEL(=...:free, 교체는 localStorage "loop.or_model")
-  - 키는 localStorage "loop.or_key"에만 저장(코드·깃 미포함). "🔑 맞춤추천 켜기" 링크로 1회 입력
-  - 논블로킹: 프리셋 먼저 채우고, AI 응답 오면 사용자가 손 안 댔을 때만 교체
-  - 실패/무키/오프라인 → 프리셋으로 자동 폴백. 앱 절대 안 깨짐
-- 여전히 하루 1항목 원칙 유지. 추천은 입력창 프리필일 뿐, 확정은 사용자가 누름
+## 상태: v1 완성
+- 순수 유닛테스트(33개) + 헤드리스 DOM(대시보드 흐름) + AI 스텁(분해/계획/폴백) 전부 통과
+- 배포: 폴더째 Vercel
 
 ## 개발 규약
-- 한 단계 한 파일 원칙. 전체 코드 한 번에 쏟지 않음
-- 스펙 모순은 코드 전에 질문 (자정 모순은 해소 완료: 읽기전용)
-- 테스트는 시각을 주입해 검증(실제 시각 대기 금지). 타이머 60분은 테스트용 단축값으로 확인
+- 스택·파일4개 유지. 스펙 밖 기능은 사용자 승인 후에만
+- 테스트는 시각 주입·fetch 스텁으로 결정적으로. 실제 시각/네트워크 대기 금지
+- v0("하루 한 줄", 밤/아침 타이머)는 폐기됨. git 히스토리에만 존재

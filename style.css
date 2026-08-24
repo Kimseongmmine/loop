@@ -129,6 +129,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 .infowrap { margin-bottom: 18px; }
 .infohd { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+.aihd { font-size: 14px; font-weight: 700; margin: 18px 0 6px; }
 .field { margin-bottom: 12px; }
 .flabel { display: block; font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 5px; }
 .finput, input[type="text"], .situation {

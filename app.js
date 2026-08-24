@@ -144,12 +144,11 @@ function nextPendingTasks(profile, n) {
 // ---- OpenRouter plumbing (reused from v0) ----
 const OR_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 // 무료 모델 목록은 수시로 바뀜. orChat이 아래 순서로 자동 시도해 되는 걸 찾음.
+// thinkingmachines/* 는 게이팅됨(403 "agentic harnesses only") → 제외
 const OR_FREE_MODELS = [
-  "poolside/laguna-s-2.1:free",
-  "thinkingmachines/inkling:free",
   "nvidia/nemotron-3.5-lightning:free",
+  "poolside/laguna-s-2.1:free",
   "dots-studio/dots-3-note-preview:free",
-  "thinkingmachines/inkling-small:free",
   "liquid/lfm-2.5-2.6b:free"
 ];
 const OR_DEFAULT_MODEL = OR_FREE_MODELS[0];
@@ -157,6 +156,15 @@ function getKey() { try { return localStorage.getItem(K_ORKEY) || ""; } catch (e
 function setKey(k) { try { localStorage.setItem(K_ORKEY, k); } catch (e) {} }
 function getModel() { try { return localStorage.getItem(K_ORMODEL) || OR_DEFAULT_MODEL; } catch (e) { return OR_DEFAULT_MODEL; } }
 function setModel(m) { try { localStorage.setItem(K_ORMODEL, m); } catch (e) {} }
+
+// ---- Google Gemini (more reliable free tier; preferred when a key is set) ----
+const K_GEMKEY = "loop.gemini_key";
+const K_GEMMODEL = "loop.gemini_model";
+const GEM_DEFAULT_MODEL = "gemini-2.0-flash";
+function getGemKey() { try { return localStorage.getItem(K_GEMKEY) || ""; } catch (e) { return ""; } }
+function setGemKey(k) { try { localStorage.setItem(K_GEMKEY, k); } catch (e) {} }
+function getGemModel() { try { return localStorage.getItem(K_GEMMODEL) || GEM_DEFAULT_MODEL; } catch (e) { return GEM_DEFAULT_MODEL; } }
+function hasAI() { return (getGemKey() || getKey()) && typeof fetch !== "undefined"; }
 
 // tolerant JSON extraction from a model reply (handles ```json fences, prose around it)
 function extractJSON(text) {
@@ -240,13 +248,52 @@ async function orChat(messages, maxTokens, parse) {
         setModel(model); lastAIError = ""; return r.content;
       }
       last = "HTTP " + r.status + " · " + r.error + " [" + model + "]";
-      if (r.status === 401 || r.status === 403) break; // 키/권한 → 다른 모델도 무의미
+      // 401 = 키 자체 문제(모든 모델 무의미) → 중단. 403은 그 모델만 막힌 것 → 다음 모델로.
+      if (r.status === 401) break;
     } catch (e) {
       last = "네트워크 오류 · " + (e && e.message ? e.message : e);
     }
   }
   lastAIError = last;
   return null;
+}
+
+// Google Gemini — single reliable call with JSON-friendly output
+async function geminiChat(messages, maxTokens, parse) {
+  const key = getGemKey();
+  if (!key || typeof fetch === "undefined") { lastAIError = "Gemini 키가 없습니다."; return null; }
+  const sys = messages.filter(function (m) { return m.role === "system"; }).map(function (m) { return m.content; }).join("\n");
+  const userParts = messages.filter(function (m) { return m.role !== "system"; }).map(function (m) { return { text: m.content }; });
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + getGemModel() + ":generateContent?key=" + encodeURIComponent(key);
+  const body = { contents: [{ role: "user", parts: userParts }], generationConfig: { maxOutputTokens: maxTokens || 900, temperature: 0.6 } };
+  if (sys) body.system_instruction = { parts: [{ text: sys }] };
+  try {
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!res.ok) {
+      let b = ""; try { b = await res.text(); } catch (e) {}
+      let msg = b; try { const j = JSON.parse(b); msg = (j.error && j.error.message) || b; } catch (e) {}
+      lastAIError = "Gemini HTTP " + res.status + " · " + String(msg).slice(0, 200);
+      return null;
+    }
+    const data = await res.json();
+    const cand = data && data.candidates && data.candidates[0];
+    const c = cand && cand.content && cand.content.parts && cand.content.parts.map(function (p) { return p.text || ""; }).join("");
+    if (!c) { lastAIError = "Gemini 빈 응답 · " + JSON.stringify(data).slice(0, 200); return null; }
+    if (parse) {
+      const v = parse(c);
+      if (v != null) { lastAIError = ""; return v; }
+      lastAIError = "Gemini 응답을 못 읽음 · " + String(c).replace(/\s+/g, " ").slice(0, 140);
+      return null;
+    }
+    lastAIError = "";
+    return c;
+  } catch (e) { lastAIError = "Gemini 네트워크 오류 · " + (e && e.message ? e.message : e); return null; }
+}
+
+// route to whichever provider has a key (Gemini preferred for reliability)
+async function aiChat(messages, maxTokens, parse) {
+  if (getGemKey()) return geminiChat(messages, maxTokens, parse);
+  return orChat(messages, maxTokens, parse);
 }
 
 // ---- plan building (pure) ----
@@ -336,7 +383,7 @@ async function aiBreakdownGoal(goal) {
     (goal.note ? ("\n메모: " + goal.note) : "") +
     (traits ? ("\n내 특성(참고): " + traits) : "") +
     "\n\n이 목표를 완수하기 위한 구체적 과제 목록:";
-  const list = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 500, parseTaskList);
+  const list = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 500, parseTaskList);
   if (list) {
     return list.slice(0, 10).map(function (t) { return { id: genId("t"), text: String(t).slice(0, 70), done: false }; });
   }
@@ -357,7 +404,7 @@ async function aiGeneratePlan(candidates) {
     "[후보 과제]\n" + (list || "(없음)") +
     "\n\n위를 반영해 시간표를 JSON으로.";
   const parse = function (c) { const j = extractJSON(c); return (j && Array.isArray(j.blocks) && j.blocks.length) ? j.blocks : null; };
-  const blocks = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 900, parse);
+  const blocks = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 900, parse);
   if (blocks) return mapAIBlocks(blocks, candidates);
   return null;
 }
@@ -391,9 +438,9 @@ async function generatePlan(targetDate) {
   render(); // loading state
 
   try {
-    const hasAI = !!getKey() && typeof fetch !== "undefined";
+    const aiOn = hasAI();
     // 1) break down any goal that has no tasks (AI)
-    if (hasAI) {
+    if (aiOn) {
       const profile = loadProfile();
       let changed = false;
       for (let i = 0; i < profile.goals.length; i++) {
@@ -408,7 +455,7 @@ async function generatePlan(targetDate) {
     // 2) build the hourly plan (AI, else template)
     const candidates = nextPendingTasks(loadProfile(), 6);
     let blocks = null, source = "template";
-    if (hasAI) { blocks = await aiGeneratePlan(candidates); if (blocks) source = "ai"; }
+    if (aiOn) { blocks = await aiGeneratePlan(candidates); if (blocks) source = "ai"; }
     if (!blocks) { blocks = templatePlan(candidates); source = "template"; }
     const plans = loadPlans();
     plans[targetDate] = { blocks: blocks, generatedAt: new Date().toISOString(), source: source };
@@ -531,9 +578,9 @@ function renderToday() {
     box.appendChild(row);
   });
   if (plan.source === "template") {
-    if (getKey()) {
+    if (hasAI()) {
       box.appendChild(el("p", { cls: "err", text: "AI 실패 → 기본 템플릿. 이유: " + (lastAIError || "알 수 없음") }));
-      box.appendChild(el("p", { cls: "muted", text: "해결: ① openrouter.ai → Settings → Privacy에서 무료 모델(prompt logging) 허용 켜기  ② 안 되면 설정에서 키/모델 변경" }));
+      box.appendChild(el("p", { cls: "muted", text: "설정에서 Gemini 키를 넣으면 가장 안정적이에요. 또는 다시 생성." }));
     } else {
       box.appendChild(el("p", { cls: "muted", text: "AI 없이 기본 템플릿입니다. 설정에서 AI를 켜면 맞춤 계획이 됩니다." }));
     }
@@ -617,7 +664,7 @@ function renderSettings() {
     gv.appendChild(addRow);
 
     // AI breakdown button (generate concrete homework for this goal)
-    if (getKey()) {
+    if (hasAI()) {
       if (breaking === g.id) {
         gv.appendChild(el("span", { cls: "muted", text: "AI가 과제로 쪼개는 중…" }));
       } else {
@@ -647,32 +694,49 @@ function renderSettings() {
   gadd.appendChild(gi); gadd.appendChild(gb);
   box.appendChild(gadd);
 
-  // key entry
-  if (!getKey()) {
-    const kl = el("button", { cls: "mini", text: "🔑 AI 맞춤계획 켜기" });
-    kl.addEventListener("click", function () {
-      const k = window.prompt("OpenRouter API 키 (sk-or-...):", "");
-      if (k && k.trim()) { setKey(k.trim()); render(); }
+  // ---- AI 연결 (provider 설정) ----
+  box.appendChild(el("div", { cls: "aihd", text: "AI 연결" }));
+  const active = getGemKey() ? ("Gemini · " + getGemModel()) : (getKey() ? ("OpenRouter · " + getModel()) : "꺼짐 (기본 템플릿만)");
+  box.appendChild(el("div", { cls: "muted", text: "현재: " + active }));
+
+  const krow = el("div", { cls: "addrow" });
+
+  const gemBtn = el("button", { cls: "mini bd", text: getGemKey() ? "Gemini 키 변경" : "🔑 Gemini 키 입력 (추천)" });
+  gemBtn.addEventListener("click", function () {
+    const v = window.prompt("Google Gemini API 키 (aistudio.google.com/apikey 에서 발급):", "");
+    if (v && v.trim()) { setGemKey(v.trim()); render(); }
+  });
+  krow.appendChild(gemBtn);
+
+  const orBtn = el("button", { cls: "mini", text: getKey() ? "OpenRouter 키 변경" : "OpenRouter 키" });
+  orBtn.addEventListener("click", function () {
+    const v = window.prompt("OpenRouter API 키 (sk-or-...):", "");
+    if (v && v.trim()) { setKey(v.trim()); render(); }
+  });
+  krow.appendChild(orBtn);
+  box.appendChild(krow);
+
+  // provider-specific model change / turn off
+  const mrow = el("div", { cls: "addrow" });
+  if (getGemKey()) {
+    const gm = el("button", { cls: "mini", text: "Gemini 모델 변경" });
+    gm.addEventListener("click", function () {
+      const v = window.prompt("Gemini 모델 (예: gemini-2.0-flash, gemini-2.5-flash):", getGemModel());
+      if (v && v.trim()) { try { localStorage.setItem(K_GEMMODEL, v.trim()); } catch (e) {} render(); }
     });
-    box.appendChild(kl);
-  } else {
-    const mrow = el("div", { cls: "addrow" });
-    mrow.appendChild(el("span", { cls: "muted", text: "AI 켜짐 · 모델: " + getModel() }));
+    mrow.appendChild(gm);
+    const off = el("button", { cls: "mini", text: "Gemini 끄기" });
+    off.addEventListener("click", function () { try { localStorage.removeItem(K_GEMKEY); } catch (e) {} render(); });
+    mrow.appendChild(off);
+  } else if (getKey()) {
     const mc = el("button", { cls: "mini", text: "모델 변경" });
     mc.addEventListener("click", function () {
-      const cur = getModel();
-      const v = window.prompt("OpenRouter 모델 id (무료는 :free로 끝남):", cur);
+      const v = window.prompt("OpenRouter 모델 id (무료는 :free로 끝남):", getModel());
       if (v && v.trim()) { try { localStorage.setItem(K_ORMODEL, v.trim()); } catch (e) {} render(); }
     });
     mrow.appendChild(mc);
-    const kc = el("button", { cls: "mini", text: "키 변경" });
-    kc.addEventListener("click", function () {
-      const v = window.prompt("OpenRouter API 키 (sk-or-...):", "");
-      if (v && v.trim()) { setKey(v.trim()); render(); }
-    });
-    mrow.appendChild(kc);
-    box.appendChild(mrow);
   }
+  if (mrow.children.length) box.appendChild(mrow);
   return box;
 }
 

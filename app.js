@@ -486,33 +486,69 @@ async function aiBreakdownGoal(goal) {
   return null;
 }
 
-async function aiGeneratePlan(candidates) {
+// "2026-08-25" -> "2026-08-25 (화요일)"
+const WEEKDAYS = ["일", "월", "화", "수", "목", "금", "토"];
+function weekdayOf(dateString) {
+  const p = String(dateString).split("-").map(Number);
+  return WEEKDAYS[new Date(p[0], p[1] - 1, p[2]).getDay()] + "요일";
+}
+function dateWithWeekday(dateString) { return dateString + " (" + weekdayOf(dateString) + ")"; }
+
+async function aiGeneratePlan(candidates, targetDate) {
+  const when = targetDate ? dateWithWeekday(targetDate) : "";
   const sys = "너는 대학 3학년의 하루 시간표를 짜는 코치다. 이 사람은 쉽게 지치고 미룬다. " +
-    "아래 '내 프로필'을 최우선으로 반영해라: 고정 일정 시간대는 절대 학습 블록으로 쓰지 말고 그대로 두거나 이동/식사로 채운다. " +
+    "반드시 지정된 '날짜와 요일'에 맞춰 짜라. 고정 일정은 요일별로 다르므로 그 요일에 해당하는 것만 반영한다(다른 요일 수업을 넣지 마라). " +
+    "고정 일정 시간대는 절대 학습 블록으로 쓰지 말고 그대로 두거나 이동/식사로 채운다. " +
     "하루 리듬의 기상~취침 시간 안에서만 짜고, 집중 잘 되는 시간대에 핵심 학습을 배치한다. " +
     "현실적으로: 딥워크 사이에 휴식·이동·식사, 저녁은 가볍게, 강도 절반, 몰아치기 금지. " +
     "후보 과제를 시간표에 배치하고(각 블록 ref에 후보 index), 휴식/식사/운동/고정일정 같은 생활 블록은 ref 없이 넣어라. " +
-    "가장 중요한 3개 학습 블록에만 core:true. 오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"ref\":0,\"core\":true}]}";
+    "가장 중요한 3개 학습 블록에만 core:true. " +
+    "meals에는 그날의 아침·점심·저녁 식단을 간단히 제안한다(간편하고 현실적인 한 끼, 15자 내외). " +
+    "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"ref\":0,\"core\":true}]," +
+    "\"meals\":{\"아침\":\"...\",\"점심\":\"...\",\"저녁\":\"...\"}}";
   const ctx = profileContext(loadProfile());
   const list = candidates.map(function (c, i) { return i + ": " + c.text + " (" + c.goalTitle + ")"; }).join("\n");
   const usr =
+    (when ? ("[날짜] " + when + "\n\n") : "") +
     (ctx ? ("[내 프로필]\n" + ctx + "\n\n") : "") +
     "[후보 과제]\n" + (list || "(없음)") +
-    "\n\n위를 반영해 시간표를 JSON으로.";
+    "\n\n위 날짜/요일에 맞춰 시간표와 식단을 JSON으로.";
   // accept JSON {blocks:[...]}, a bare JSON array, OR a plain text schedule
   const parse = function (c) {
     const j = extractJSON(c);
-    if (j && Array.isArray(j.blocks) && j.blocks.length) return j.blocks;
-    if (j && Array.isArray(j.schedule) && j.schedule.length) return j.schedule;
+    if (j && Array.isArray(j.blocks) && j.blocks.length) return { blocks: j.blocks, meals: j.meals || null };
+    if (j && Array.isArray(j.schedule) && j.schedule.length) return { blocks: j.schedule, meals: j.meals || null };
     const t = String(c || "").trim();
     if (t[0] === "[") {
-      try { const arr = JSON.parse(t); if (Array.isArray(arr) && arr.length && arr[0] && arr[0].time) return arr; } catch (e) {}
+      try { const arr = JSON.parse(t); if (Array.isArray(arr) && arr.length && arr[0] && arr[0].time) return { blocks: arr, meals: null }; } catch (e) {}
     }
-    return parseTextSchedule(c, candidates);
+    const text = parseTextSchedule(c, candidates);
+    return text ? { blocks: text, meals: null } : null;
   };
-  const blocks = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 4096, parse);
-  if (blocks) return mapAIBlocks(blocks, candidates);
-  return null;
+  const res = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 4096, parse);
+  if (!res) return null;
+  const blocks = mapAIBlocks(res.blocks, candidates);
+  if (!blocks) return null;
+  return { blocks: blocks, meals: normalizeMeals(res.meals) };
+}
+
+// keep only the three meal slots, as short strings
+function normalizeMeals(m) {
+  if (!m || typeof m !== "object") return null;
+  const pick = function (keys) {
+    for (let i = 0; i < keys.length; i++) {
+      const v = m[keys[i]];
+      if (typeof v === "string" && v.trim()) return v.trim().slice(0, 40);
+      if (v && typeof v === "object" && typeof v.text === "string" && v.text.trim()) return v.text.trim().slice(0, 40);
+    }
+    return "";
+  };
+  const out = {
+    breakfast: pick(["아침", "breakfast", "조식"]),
+    lunch: pick(["점심", "lunch", "중식"]),
+    dinner: pick(["저녁", "dinner", "석식"])
+  };
+  return (out.breakfast || out.lunch || out.dinner) ? out : null;
 }
 
 // on-demand plan generation for a target date. shows loading, falls back to template.
@@ -560,11 +596,14 @@ async function generatePlan(targetDate) {
     }
     // 2) build the hourly plan (AI, else template)
     const candidates = nextPendingTasks(loadProfile(), 6);
-    let blocks = null, source = "template";
-    if (aiOn) { blocks = await aiGeneratePlan(candidates); if (blocks) source = "ai"; }
+    let blocks = null, meals = null, source = "template";
+    if (aiOn) {
+      const res = await aiGeneratePlan(candidates, targetDate);
+      if (res) { blocks = res.blocks; meals = res.meals; source = "ai"; }
+    }
     if (!blocks) { blocks = templatePlan(candidates); source = "template"; }
     const plans = loadPlans();
-    plans[targetDate] = { blocks: blocks, generatedAt: new Date().toISOString(), source: source };
+    plans[targetDate] = { blocks: blocks, meals: meals, generatedAt: new Date().toISOString(), source: source };
     savePlans(plans);
   } catch (e) {
     // last-resort template so the button never leaves an empty screen
@@ -598,7 +637,27 @@ function render() {
   root.appendChild(renderHeader());
   root.appendChild(renderProgress());
   root.appendChild(renderToday());
+  const meals = renderMeals();
+  if (meals) root.appendChild(meals);
   root.appendChild(renderSettings());
+}
+
+// meal suggestions for the active day (only when the AI produced them)
+function renderMeals() {
+  const target = activeDate(new Date());
+  const plan = loadPlans()[target];
+  const m = plan && plan.meals;
+  if (!m) return null;
+  const box = el("section", { cls: "meals" });
+  box.appendChild(el("h2", { text: "식단" }));
+  [["아침", m.breakfast], ["점심", m.lunch], ["저녁", m.dinner]].forEach(function (pair) {
+    if (!pair[1]) return;
+    const row = el("div", { cls: "meal" });
+    row.appendChild(el("span", { cls: "mlabel", text: pair[0] }));
+    row.appendChild(el("span", { cls: "mtext", text: pair[1] }));
+    box.appendChild(row);
+  });
+  return box;
 }
 
 function renderHeader() {
@@ -654,7 +713,7 @@ function renderToday() {
   const plan = loadPlans()[target];
 
   const head = el("div", { cls: "todayhead" });
-  head.appendChild(el("h2", { text: (isTomorrow ? "내일 계획" : "오늘 계획") + " · " + target }));
+  head.appendChild(el("h2", { text: (isTomorrow ? "내일 계획" : "오늘 계획") + " · " + dateWithWeekday(target) }));
   if (plan) {
     const cs = coreStatus(plan.blocks);
     head.appendChild(el("span", { cls: "core" + (cs.done >= cs.total && cs.total ? " done" : ""), text: "핵심 " + cs.done + "/" + cs.total + " · 셋만 하면 성공" }));
@@ -858,7 +917,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals
   };
 }
 

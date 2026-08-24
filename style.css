@@ -33,6 +33,28 @@ html, body {
   gap: 16px;
 }
 
+/* wide screens: use the empty side space — plan on the left, the rest on the right */
+@media (min-width: 900px) {
+  #screen {
+    max-width: 1080px;
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    grid-template-areas:
+      "hdr    hdr"
+      "today  prog"
+      "today  meals"
+      "today  settings";
+    align-items: start;
+    gap: 16px 18px;
+  }
+  .hdr { grid-area: hdr; flex-direction: row; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .hdr .grid { margin-left: auto; margin-top: 0; }
+  .today { grid-area: today; }
+  .prog { grid-area: prog; }
+  .meals { grid-area: meals; }
+  .settings { grid-area: settings; }
+}
+
 /* cards */
 .hdr, .prog, .today, .settings {
   background: var(--card);
@@ -90,6 +112,12 @@ h2 {
 .block.off .txt { text-decoration: line-through; color: var(--faint); }
 
 input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--accent); flex: none; }
+
+/* meals */
+.meal { display: flex; align-items: baseline; gap: 12px; padding: 9px 2px; }
+.meal + .meal { border-top: 1px solid #f0f1f3; }
+.mlabel { flex: none; width: 40px; font-size: 12px; font-weight: 700; color: var(--muted); }
+.mtext { font-size: 14px; }
 
 /* buttons */
 button {

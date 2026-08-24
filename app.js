@@ -30,6 +30,48 @@ const PROFILE_FIELDS = [
   { key: "prefs", label: "선호·비선호", ph: "예: 운동은 수영 / 아침 일찍은 싫음 / 카페에서 집중 잘됨" }
 ];
 
+// 식단 강화용 필드. 전부 선택이며, 채운 것만 AI에 전달된다.
+const MEAL_FIELDS = [
+  { key: "fridge", label: "냉장고·찬장에 있는 것", ph: "예: 계란 10개 / 닭가슴살 3팩 / 김치 / 두부 2모 / 즉석밥 / 양파·대파", area: true },
+  { key: "foodGoal", label: "식단 목표", ph: "예: 체중 5kg 감량 / 근육 늘리기 / 지금 유지 / 아침 거르지 않기" },
+  { key: "foodAvoid", label: "못 먹는 것 · 피할 것", ph: "예: 유당 불내증 / 오이 싫음 / 매운 것 약함" },
+  { key: "foodNote", label: "그 밖의 조건 (가중치)", ph: "예: 자취라 조리 10분 이내 / 한 끼 5천원 이내 / 점심은 학식 / 저녁은 알바 후라 늦음", area: true }
+];
+const BODY_FIELDS = [
+  { key: "heightCm", label: "키 (cm)", ph: "175" },
+  { key: "weightKg", label: "몸무게 (kg)", ph: "68" }
+];
+
+// 키·몸무게로 BMI와 하루 필요 열량 추정치(Mifflin-St Jeor, 가벼운 활동)를 낸다.
+// 어디까지나 참고 추정치이며 의학적 처방이 아니다.
+function bodyStats(profile, now) {
+  const h = parseFloat(profile && profile.heightCm);
+  const w = parseFloat(profile && profile.weightKg);
+  if (!(h > 0) || !(w > 0)) return null;
+  const age = ((now || new Date()).getFullYear()) - BIRTH_YEAR;
+  const m = h / 100;
+  const bmi = w / (m * m);
+  const bmr = 10 * w + 6.25 * h - 5 * age + 5;   // 남성 기준
+  const tdee = Math.round(bmr * 1.4 / 10) * 10;  // 가벼운 활동
+  return { heightCm: h, weightKg: w, age: age, bmi: Math.round(bmi * 10) / 10, tdee: tdee };
+}
+
+// 식단 프롬프트에 넣을 컨텍스트를 조립 (순수)
+function mealContext(profile, now) {
+  const lines = [];
+  const fridge = (profile.fridge || "").trim();
+  const goal = (profile.foodGoal || "").trim();
+  const avoid = (profile.foodAvoid || "").trim();
+  const note = (profile.foodNote || "").trim();
+  const b = bodyStats(profile, now);
+  if (fridge) lines.push("지금 있는 재료(이걸 최대한 활용해서 짜라): " + fridge);
+  if (b) lines.push("몸: 키 " + b.heightCm + "cm, 몸무게 " + b.weightKg + "kg, BMI " + b.bmi + ", 하루 필요 열량 추정 " + b.tdee + "kcal (참고치)");
+  if (goal) lines.push("식단 목표: " + goal);
+  if (avoid) lines.push("못 먹는 것·피할 것(반드시 제외): " + avoid);
+  if (note) lines.push("그 밖의 조건: " + note);
+  return lines.join("\n");
+}
+
 function loadProfile() {
   const p = lsGet(K_PROFILE, { goals: [] });
   if (!p || !Array.isArray(p.goals)) return { goals: [] };
@@ -621,10 +663,12 @@ async function aiGeneratePlan(candidates, targetDate, opts) {
     "후보 과제를 시간표에 배치하고(각 블록 ref에 후보 index), 휴식/식사/운동/고정일정 같은 생활 블록은 ref 없이 넣어라. " +
     "가장 중요한 3개 학습 블록에만 core:true. " +
     "이 사람은 쉽게 지치고 눈이 건조하다: 딥워크 사이에 '물 마시기·눈 휴식(먼 곳 보기)' 같은 짧은 회복 블록을 최소 2개 넣어라. " +
-    "meals에는 그날의 아침·점심·저녁 식단을 간단히 제안한다(간편하고 현실적인 한 끼, 15자 내외, 수분 보충 고려). " +
+    "meals에는 그날의 아침·점심·저녁을 제안한다. 규칙: [식단 조건]의 '지금 있는 재료'를 최대한 활용하고, 못 먹는 것은 반드시 제외하며, 조리 조건·목표(감량/증량/유지)·열량 추정치를 반영한다. 한 끼 20자 내외로 구체적으로. " +
+    "shopping에는 지금 재료로 부족해서 사두면 좋은 것을 3~6개, 짧은 품목명으로 넣는다(이미 있다고 적힌 재료는 넣지 마라). 재료 정보가 없으면 shopping은 빈 배열. " +
     "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"ref\":0,\"core\":true}]," +
-    "\"meals\":{\"아침\":\"...\",\"점심\":\"...\",\"저녁\":\"...\"}}";
+    "\"meals\":{\"아침\":\"...\",\"점심\":\"...\",\"저녁\":\"...\"},\"shopping\":[\"품목1\",\"품목2\"]}";
   const ctx = profileContext(loadProfile());
+  const mctx = mealContext(loadProfile(), new Date());
   const list = candidates.map(function (c, i) { return i + ": " + c.text + " (" + c.goalTitle + ")"; }).join("\n");
   const energy = targetDate ? getEnergy(targetDate) : "";
   const notes = targetDate ? recentNotes(targetDate, 3) : [];
@@ -633,14 +677,15 @@ async function aiGeneratePlan(candidates, targetDate, opts) {
     (opts.fromTime ? ("[지금 " + opts.fromTime + "] 하루가 이미 시작됐다. " + opts.fromTime + "부터 취침까지 남은 시간만으로 다시 짜라. 지나간 시간은 넣지 마라. 남은 시간이 짧으면 핵심을 줄여라.\n\n") : "") +
     (energy && ENERGY_RULE[energy] ? ("[오늘 배터리] " + ENERGY_RULE[energy] + "\n\n") : "") +
     (ctx ? ("[내 프로필]\n" + ctx + "\n\n") : "") +
+    (mctx ? ("[식단 조건]\n" + mctx + "\n\n") : "") +
     (notes.length ? ("[최근 회고 — 반영해서 조정]\n" + notes.map(function (n) { return "- " + n.date + ": " + n.text; }).join("\n") + "\n\n") : "") +
     "[후보 과제]\n" + (list || "(없음)") +
     "\n\n위 날짜/요일에 맞춰 시간표와 식단을 JSON으로.";
   // accept JSON {blocks:[...]}, a bare JSON array, OR a plain text schedule
   const parse = function (c) {
     const j = extractJSON(c);
-    if (j && Array.isArray(j.blocks) && j.blocks.length) return { blocks: j.blocks, meals: j.meals || null };
-    if (j && Array.isArray(j.schedule) && j.schedule.length) return { blocks: j.schedule, meals: j.meals || null };
+    if (j && Array.isArray(j.blocks) && j.blocks.length) return { blocks: j.blocks, meals: j.meals || null, shopping: j.shopping || null };
+    if (j && Array.isArray(j.schedule) && j.schedule.length) return { blocks: j.schedule, meals: j.meals || null, shopping: j.shopping || null };
     const t = String(c || "").trim();
     if (t[0] === "[") {
       try { const arr = JSON.parse(t); if (Array.isArray(arr) && arr.length && arr[0] && arr[0].time) return { blocks: arr, meals: null }; } catch (e) {}
@@ -652,7 +697,17 @@ async function aiGeneratePlan(candidates, targetDate, opts) {
   if (!res) return null;
   const blocks = mapAIBlocks(res.blocks, candidates);
   if (!blocks) return null;
-  return { blocks: blocks, meals: normalizeMeals(res.meals) };
+  return { blocks: blocks, meals: normalizeMeals(res.meals), shopping: normalizeShopping(res.shopping) };
+}
+
+// 장보기 목록 정규화: 짧은 품목명 최대 6개
+function normalizeShopping(arr) {
+  if (!Array.isArray(arr)) return null;
+  const out = arr.map(function (x) {
+    if (typeof x === "string") return x.trim();
+    return (x && (x.name || x.item || x.text) ? String(x.name || x.item || x.text).trim() : "");
+  }).filter(function (v) { return v && v.length <= 30; }).slice(0, 6);
+  return out.length ? out : null;
 }
 
 // keep only the three meal slots, as short strings
@@ -720,10 +775,10 @@ async function generatePlan(targetDate, opts) {
     }
     // 2) build the hourly plan (AI, else template)
     const candidates = nextPendingTasks(loadProfile(), 6);
-    let blocks = null, meals = null, source = "template";
+    let blocks = null, meals = null, shopping = null, source = "template";
     if (aiOn) {
       const res = await aiGeneratePlan(candidates, targetDate, opts);
-      if (res) { blocks = res.blocks; meals = res.meals; source = "ai"; }
+      if (res) { blocks = res.blocks; meals = res.meals; shopping = res.shopping; source = "ai"; }
     }
     if (!blocks) {
       blocks = templatePlan(candidates);
@@ -750,6 +805,7 @@ async function generatePlan(targetDate, opts) {
     plans[targetDate] = {
       blocks: blocks,
       meals: meals || (prev && prev.meals) || null,
+      shopping: shopping || (prev && prev.shopping) || null,
       generatedAt: new Date().toISOString(),
       source: source
     };
@@ -1026,20 +1082,48 @@ function renderFooter() {
 
 // meal suggestions for the active day (only when the AI produced them)
 function renderMeals() {
-  const target = activeDate(new Date());
+  const now = new Date();
+  const target = activeDate(now);
   const plan = loadPlans()[target];
   const m = plan && plan.meals;
-  if (!m) return null;
+  const shopping = plan && plan.shopping;
+  const profile = loadProfile();
+  const b = bodyStats(profile, now);
+  const hasFridge = !!(profile.fridge || "").trim();
+  if (!m && !shopping && !b && !hasFridge) return null;
+
   const box = el("section", { cls: "meals" });
   box.setAttribute("aria-label", "식단");
   box.appendChild(el("h2", { text: "식단" }));
-  [["아침", m.breakfast], ["점심", m.lunch], ["저녁", m.dinner]].forEach(function (pair) {
-    if (!pair[1]) return;
-    const row = el("div", { cls: "meal" });
-    row.appendChild(el("span", { cls: "mlabel", text: pair[0] }));
-    row.appendChild(el("span", { cls: "mtext", text: pair[1] }));
-    box.appendChild(row);
-  });
+
+  if (m) {
+    [["아침", m.breakfast], ["점심", m.lunch], ["저녁", m.dinner]].forEach(function (pair) {
+      if (!pair[1]) return;
+      const row = el("div", { cls: "meal" });
+      row.appendChild(el("span", { cls: "mlabel", text: pair[0] }));
+      row.appendChild(el("span", { cls: "mtext", text: pair[1] }));
+      box.appendChild(row);
+    });
+  } else {
+    box.appendChild(el("p", { cls: "muted", text: "계획을 생성하면 지금 있는 재료로 식단이 짜입니다." }));
+  }
+
+  // 몸 참고치 — 건조한 사실만
+  if (b) {
+    box.appendChild(el("p", { cls: "muted bodyline", text: "키 " + b.heightCm + " · " + b.weightKg + "kg · BMI " + b.bmi + " · 하루 " + b.tdee + "kcal 추정" }));
+  }
+
+  // 장보기: 지금 재료로 부족한 것
+  if (shopping && shopping.length) {
+    const sw = el("div", { cls: "shop" });
+    sw.appendChild(el("div", { cls: "llabel", text: "사두면 좋은 것" }));
+    const ul = el("ul", { cls: "shoplist" });
+    shopping.forEach(function (it) { ul.appendChild(el("li", { text: it })); });
+    sw.appendChild(ul);
+    box.appendChild(sw);
+  } else if (!hasFridge) {
+    box.appendChild(el("p", { cls: "muted", text: "설정에 냉장고 재료를 적으면, 그걸로 짜고 부족한 것만 알려줍니다." }));
+  }
   return box;
 }
 
@@ -1196,6 +1280,48 @@ function renderSettings() {
     info.appendChild(wrap);
   });
   box.appendChild(info);
+
+  // ---- 식단·몸 ----
+  const food = el("div", { cls: "infowrap" });
+  food.appendChild(el("div", { cls: "infohd", text: "식단 · 몸 (채우면 식단이 내 재료와 몸에 맞춰집니다)" }));
+
+  const brow = el("div", { cls: "addrow bodyrow" });
+  BODY_FIELDS.forEach(function (fld) {
+    const w = el("div", { cls: "bodyfield" });
+    const lab = el("label", { cls: "flabel", text: fld.label });
+    lab.htmlFor = "f-" + fld.key;
+    w.appendChild(lab);
+    const inp = el("input", { cls: "dl bodyinput" });
+    inp.type = "number"; inp.id = "f-" + fld.key; inp.placeholder = fld.ph;
+    inp.value = profile[fld.key] || "";
+    bindField(inp, "f-" + fld.key, function (v) {
+      const p = loadProfile(); p[fld.key] = v; saveProfile(p);
+      render(); // BMI·열량 추정치를 바로 갱신 (포커스·커서는 render가 보존)
+    });
+    w.appendChild(inp);
+    brow.appendChild(w);
+  });
+  food.appendChild(brow);
+  const bs = bodyStats(profile, new Date());
+  if (bs) food.appendChild(el("div", { cls: "muted", text: "BMI " + bs.bmi + " · 하루 필요 열량 추정 " + bs.tdee + "kcal (참고치)" }));
+
+  MEAL_FIELDS.forEach(function (fld) {
+    const wrap = el("div", { cls: "field" });
+    const lab = el("label", { cls: "flabel", text: fld.label });
+    lab.htmlFor = "f-" + fld.key;
+    wrap.appendChild(lab);
+    const node = fld.area ? el("textarea", { cls: "finput" }) : el("input", { cls: "finput oneline" });
+    if (!fld.area) node.type = "text";
+    node.id = "f-" + fld.key;
+    node.placeholder = fld.ph;
+    node.value = profile[fld.key] || "";
+    bindField(node, "f-" + fld.key, function (v) {
+      const p = loadProfile(); p[fld.key] = v; saveProfile(p);
+    });
+    wrap.appendChild(node);
+    food.appendChild(wrap);
+  });
+  box.appendChild(food);
 
   profile.goals.forEach(function (g) {
     const gv = el("div", { cls: "goal" });
@@ -1549,7 +1675,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, render
   };
 }
 

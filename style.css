@@ -313,3 +313,14 @@ button:disabled { opacity: 0.5; cursor: default; }
 .yrow.now { background: var(--accent-soft); }
 .yrow.now .ygz, .yrow.now .ytone { color: var(--accent); }
 .yrow.good .ytone { color: var(--ok); }
+
+/* 식단 강화: 몸 입력 · 장보기 */
+.bodyrow { align-items: flex-end; }
+.bodyfield { flex: 1 1 120px; min-width: 0; }
+.bodyfield .flabel { margin-bottom: 5px; }
+.bodyinput { width: 100%; margin-left: 0; }
+.oneline { min-height: 0; }
+.bodyline { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.shop { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.shoplist { margin: 6px 0 0; padding-left: 18px; }
+.shoplist li { font-size: 14px; padding: 3px 0; color: var(--muted); }

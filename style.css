@@ -132,7 +132,6 @@ button:disabled { opacity: 0.5; cursor: default; }
 .field { margin-bottom: 12px; }
 .flabel { display: block; font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 5px; }
 .finput, input[type="text"], .situation {
-  width: 100%;
   background: #fff;
   border: 1px solid #d1d5db;
   color: var(--ink);
@@ -143,14 +142,19 @@ button:disabled { opacity: 0.5; cursor: default; }
   border-radius: 8px;
   outline: none;
 }
+.finput, .situation { width: 100%; }
 .finput { min-height: 46px; resize: vertical; }
 .finput:focus, input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
 .finput::placeholder, input::placeholder { color: #b6bcc4; }
 
 .goal { padding: 14px 0; border-top: 1px solid var(--line); }
-.goaltop { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.goaltop { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .goaltop strong { font-size: 15px; }
 .dl { flex: none; width: 96px; font-size: 12px; padding: 6px 8px; margin-left: auto; }
 .task { display: flex; align-items: center; gap: 9px; padding: 6px 0; font-size: 14px; cursor: pointer; }
 .task.off span { text-decoration: line-through; color: var(--faint); }
-.addrow { display: flex; gap: 8px; margin-top: 8px; }
+
+/* input rows: text field flexes and can shrink, button stays fixed */
+.addrow { display: flex; gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
+.addrow input[type="text"] { flex: 1 1 auto; min-width: 0; }
+.addrow button { flex: 0 0 auto; }

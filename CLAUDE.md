@@ -1,7 +1,11 @@
 # LOOP — 프로젝트 기록 (CLAUDE.md)
 
-## 무엇 (v1)
-접속하면 AI가 내 목표를 분석해 오늘 하루(9~24시) 시간표를 짜주고, 목표별 진행도 + 접속 스트릭을 보여주는 개인 대시보드 PWA.
+## 무엇 (v1.1)
+내 상황(목표+자유 상황메모)을 적어두고 "계획 생성" 버튼을 누르면 AI가 하루(9~24시) 시간표를 짜주는 개인 대시보드 PWA.
+밤(21시~) 누르면 내일 것, 낮이면 오늘 것(activeDate). 목표별 진행도 + 접속 스트릭 표시.
+생성은 온디맨드(자동 아님). 무키/실패 시 템플릿 폴백.
+- 배포: GitHub Pages (https://kimseongmmine.github.io/loop/), git push하면 자동 갱신
+- 핵심 추가 함수: activeDate, generatePlan(로딩상태 generating), profile.situation, goal.deadline
 
 ## 왜 (사용자 맥락)
 매일 "뭘 할지" 정하는 결정 자체가 실패 지점(관성 약함). 그 결정을 AI에게 넘긴다.

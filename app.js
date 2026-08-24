@@ -48,6 +48,11 @@ function addDays(dateString, delta) {
 function genId(prefix) {
   return (prefix || "id") + "_" + Date.now().toString(36) + "_" + Math.floor(Math.random() * 1e6).toString(36);
 }
+// which day a "계획 생성" targets: night (21:00~) -> tomorrow, else today
+function activeDate(now) {
+  now = now || new Date();
+  return now.getHours() >= 21 ? addDays(todayStr(now), 1) : todayStr(now);
+}
 
 // ---- visits / streak (pure) ----
 function recordVisit(visits, today) {
@@ -220,7 +225,11 @@ function setBlockDone(date, blockId, checked) {
 async function aiBreakdownGoal(goal) {
   const sys = "너는 학습 코치다. 주어진 목표를 60분 안에 하나씩 끝낼 수 있는 아주 구체적인 실행 과제 5~8개로 쪼갠다. " +
     "순서대로, 작고 명확하게. 한국어. 오직 JSON만 출력: {\"tasks\":[\"과제1\",\"과제2\"]}";
-  const usr = "목표: " + goal.title + (goal.note ? ("\n메모: " + goal.note) : "");
+  const situation = (loadProfile().situation || "").trim();
+  const usr = "목표: " + goal.title +
+    (goal.deadline ? ("\n마감: " + goal.deadline) : "") +
+    (goal.note ? ("\n메모: " + goal.note) : "") +
+    (situation ? ("\n내 상황: " + situation) : "");
   const txt = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 500);
   const j = extractJSON(txt);
   if (j && Array.isArray(j.tasks) && j.tasks.length) {
@@ -234,53 +243,64 @@ async function aiGeneratePlan(candidates) {
     "09:00~24:00을 시간 블록으로 채우되 현실적으로: 딥워크 사이에 휴식·이동·식사, 저녁은 가볍게. 강도는 절반, 몰아치기 금지. " +
     "주어진 후보 과제를 시간표에 배치하고(각 블록의 ref에 후보 index), 휴식/식사/운동 같은 생활 블록은 ref 없이 넣어라. " +
     "가장 중요한 3개 학습 블록에만 core:true. 오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"ref\":0,\"core\":true}]}";
+  const profile = loadProfile();
+  const situation = (profile.situation || "").trim();
+  const deadlines = profile.goals
+    .filter(function (g) { return g.deadline; })
+    .map(function (g) { return "- " + g.title + ": 마감 " + g.deadline; }).join("\n");
   const list = candidates.map(function (c, i) { return i + ": " + c.text + " (" + c.goalTitle + ")"; }).join("\n");
-  const usr = "후보 과제:\n" + (list || "(없음)") + "\n\n오늘 09~24시 시간표를 JSON으로.";
+  const usr =
+    (situation ? ("내 상황: " + situation + "\n\n") : "") +
+    (deadlines ? ("마감 있는 목표:\n" + deadlines + "\n\n") : "") +
+    "후보 과제:\n" + (list || "(없음)") +
+    "\n\n09~24시 시간표를 JSON으로. 마감 급한 목표를 앞쪽·핵심으로.";
   const txt = await orChat([{ role: "system", content: sys }, { role: "user", content: usr }], 900);
   const j = extractJSON(txt);
   if (j && Array.isArray(j.blocks)) return mapAIBlocks(j.blocks, candidates);
   return null;
 }
 
-// ensure today's plan exists (synchronous template first; caller may upgrade via AI)
-function ensureTodayPlanSync() {
-  const today = todayStr();
-  const plans = loadPlans();
-  if (plans[today] && plans[today].blocks && plans[today].blocks.length) return plans[today];
-  const candidates = nextPendingTasks(loadProfile(), 6);
-  plans[today] = { blocks: templatePlan(candidates), generatedAt: new Date().toISOString(), source: "template" };
-  savePlans(plans);
-  return plans[today];
-}
+// on-demand plan generation for a target date. shows loading, falls back to template.
+let generating = false;
+async function generatePlan(targetDate) {
+  if (generating) return;
+  generating = true;
+  render(); // loading state
 
-// async: fill missing goal tasks + upgrade today's plan with AI, then re-render
-async function aiEnhance() {
-  if (!getKey() || typeof fetch === "undefined") return;
-  let changed = false;
-  const profile = loadProfile();
-  for (let i = 0; i < profile.goals.length; i++) {
-    const g = profile.goals[i];
-    if (!g.tasks || g.tasks.length === 0) {
-      const tasks = await aiBreakdownGoal(g);
-      if (tasks) { g.tasks = tasks; g.analyzedAt = new Date().toISOString(); changed = true; }
+  try {
+    const hasAI = !!getKey() && typeof fetch !== "undefined";
+    // 1) break down any goal that has no tasks (AI)
+    if (hasAI) {
+      const profile = loadProfile();
+      let changed = false;
+      for (let i = 0; i < profile.goals.length; i++) {
+        const g = profile.goals[i];
+        if (!g.tasks || g.tasks.length === 0) {
+          const tasks = await aiBreakdownGoal(g);
+          if (tasks) { g.tasks = tasks; g.analyzedAt = new Date().toISOString(); changed = true; }
+        }
+      }
+      if (changed) saveProfile(profile);
     }
-  }
-  if (changed) saveProfile(profile);
-
-  const today = todayStr();
-  const plans = loadPlans();
-  const plan = plans[today];
-  // only replace an untouched template (don't overwrite progress the user made)
-  const untouched = plan && plan.source === "template" && plan.blocks.every(function (b) { return !b.done; });
-  if (untouched || changed) {
+    // 2) build the hourly plan (AI, else template)
     const candidates = nextPendingTasks(loadProfile(), 6);
-    const blocks = await aiGeneratePlan(candidates);
-    if (blocks) {
-      plans[today] = { blocks: blocks, generatedAt: new Date().toISOString(), source: "ai" };
+    let blocks = null, source = "template";
+    if (hasAI) { blocks = await aiGeneratePlan(candidates); if (blocks) source = "ai"; }
+    if (!blocks) { blocks = templatePlan(candidates); source = "template"; }
+    const plans = loadPlans();
+    plans[targetDate] = { blocks: blocks, generatedAt: new Date().toISOString(), source: source };
+    savePlans(plans);
+  } catch (e) {
+    // last-resort template so the button never leaves an empty screen
+    const plans = loadPlans();
+    if (!plans[targetDate]) {
+      plans[targetDate] = { blocks: templatePlan(nextPendingTasks(loadProfile(), 6)), generatedAt: new Date().toISOString(), source: "template" };
       savePlans(plans);
     }
+  } finally {
+    generating = false;
+    render();
   }
-  render();
 }
 
 // ---- DOM helpers ----
@@ -343,40 +363,54 @@ function renderProgress() {
   return box;
 }
 
-// if today's plan is a template no one has checked yet, rebuild it from current tasks
-function refreshTemplateIfUntouched() {
-  const today = todayStr();
-  const plans = loadPlans();
-  const plan = plans[today];
-  if (plan && plan.source === "template" && plan.blocks.every(function (b) { return !b.done; })) {
-    plan.blocks = templatePlan(nextPendingTasks(loadProfile(), 6));
-    plan.generatedAt = new Date().toISOString();
-    savePlans(plans);
-  }
+function genButton(target, label) {
+  const btn = el("button", { cls: "gen", text: label });
+  btn.disabled = generating;
+  btn.addEventListener("click", function () { generatePlan(target); });
+  return btn;
 }
 
 function renderToday() {
   const box = el("section", { cls: "today" });
-  ensureTodayPlanSync();
-  refreshTemplateIfUntouched();
-  const plan = loadPlans()[todayStr()];
-  const cs = coreStatus(plan.blocks);
+  const now = new Date();
+  const target = activeDate(now);
+  const isTomorrow = target !== todayStr(now);
+  const plan = loadPlans()[target];
+
   const head = el("div", { cls: "todayhead" });
-  head.appendChild(el("h2", { text: "오늘 계획" }));
-  head.appendChild(el("span", { cls: "core" + (cs.done >= cs.total && cs.total ? " done" : ""), text: "핵심 " + cs.done + "/" + cs.total + " · 셋만 하면 성공" }));
+  head.appendChild(el("h2", { text: (isTomorrow ? "내일 계획" : "오늘 계획") + " · " + target }));
+  if (plan) {
+    const cs = coreStatus(plan.blocks);
+    head.appendChild(el("span", { cls: "core" + (cs.done >= cs.total && cs.total ? " done" : ""), text: "핵심 " + cs.done + "/" + cs.total + " · 셋만 하면 성공" }));
+  }
   box.appendChild(head);
+
+  if (generating) {
+    box.appendChild(el("p", { cls: "muted", text: "AI가 계획 짜는 중…" }));
+    return box;
+  }
+
+  if (!plan) {
+    box.appendChild(el("p", { cls: "muted", text: "아직 계획이 없어요. 아래 버튼을 누르면 AI가 짜줍니다." }));
+    box.appendChild(genButton(target, "계획 생성"));
+    return box;
+  }
 
   plan.blocks.forEach(function (b) {
     const row = el("label", { cls: "block" + (b.core ? " isCore" : "") + (b.done ? " off" : "") });
     const cb = el("input");
     cb.type = "checkbox";
     cb.checked = !!b.done;
-    cb.addEventListener("change", function () { setBlockDone(todayStr(), b.id, cb.checked); render(); });
+    cb.addEventListener("change", function () { setBlockDone(target, b.id, cb.checked); render(); });
     row.appendChild(cb);
     row.appendChild(el("span", { cls: "time", text: b.time }));
     row.appendChild(el("span", { cls: "txt", text: (b.core ? "● " : "") + b.text }));
     box.appendChild(row);
   });
+  if (plan.source === "template") {
+    box.appendChild(el("p", { cls: "muted", text: getKey() ? "AI 응답 실패로 기본 템플릿입니다. 다시 생성해 보세요." : "AI 없이 기본 템플릿입니다. 설정에서 AI를 켜면 맞춤 계획이 됩니다." }));
+  }
+  box.appendChild(genButton(target, "다시 생성"));
   return box;
 }
 
@@ -386,10 +420,29 @@ function renderSettings() {
   box.appendChild(sum);
 
   const profile = loadProfile();
+
+  // free-text situation memo (fed to the AI planner)
+  const sitWrap = el("div", { cls: "sitwrap" });
+  sitWrap.appendChild(el("div", { cls: "muted", text: "내 상황 (AI가 계획 짤 때 참고)" }));
+  const sit = el("textarea", { cls: "situation" });
+  sit.placeholder = "예: 아침에 약함 / 화요일 공강 / 정처기 7월 시험 / 저녁엔 집중 안 됨";
+  sit.value = profile.situation || "";
+  sit.addEventListener("change", function () {
+    const p = loadProfile(); p.situation = sit.value; saveProfile(p);
+  });
+  sitWrap.appendChild(sit);
+  box.appendChild(sitWrap);
+
   profile.goals.forEach(function (g) {
     const gv = el("div", { cls: "goal" });
     const top = el("div", { cls: "goaltop" });
     top.appendChild(el("strong", { text: g.title }));
+    const dl = el("input", { cls: "dl" }); dl.type = "text"; dl.placeholder = "마감(선택)"; dl.value = g.deadline || "";
+    dl.addEventListener("change", function () {
+      const p = loadProfile(); const gg = findGoal(p, g.id);
+      if (gg) { gg.deadline = dl.value; saveProfile(p); }
+    });
+    top.appendChild(dl);
     const del = el("button", { cls: "mini", text: "삭제" });
     del.addEventListener("click", function () {
       const p = loadProfile();
@@ -457,7 +510,7 @@ function renderSettings() {
     const kl = el("button", { cls: "mini", text: "🔑 AI 맞춤계획 켜기" });
     kl.addEventListener("click", function () {
       const k = window.prompt("OpenRouter API 키 (sk-or-...):", "");
-      if (k && k.trim()) { setKey(k.trim()); render(); aiEnhance(); }
+      if (k && k.trim()) { setKey(k.trim()); render(); }
     });
     box.appendChild(kl);
   } else {
@@ -466,21 +519,18 @@ function renderSettings() {
   return box;
 }
 
-// bootstrap: record visit, render immediately (template), then AI-enhance async
+// bootstrap: record visit, render. Plan is generated only on button press.
 function boot() {
-  const today = todayStr();
-  saveVisits(recordVisit(loadVisits(), today));
-  ensureTodayPlanSync();
+  saveVisits(recordVisit(loadVisits(), todayStr()));
   render();
-  aiEnhance().catch(function () {});
 }
 
 // ---- exports for node tests ----
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
-    findGoal, extractJSON, todayStr, dateStr, addDays, pad2,
-    templatePlan, mapAIBlocks, coreStatus, aiEnhance
+    findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
+    templatePlan, mapAIBlocks, coreStatus, generatePlan
   };
 }
 

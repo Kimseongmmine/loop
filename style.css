@@ -98,3 +98,51 @@ button {
 }
 button:active { background: #1a1a1a; }
 .mini { font-size: 12px; padding: 6px 10px; }
+
+/* generate button */
+.gen {
+  margin-top: 14px;
+  width: 100%;
+  padding: 13px;
+  border: 1px solid #3ea6ff;
+  color: #3ea6ff;
+  font-size: 15px;
+  font-weight: 600;
+}
+.gen:active { background: #10202e; }
+.gen:disabled { opacity: 0.5; }
+
+/* situation memo */
+.sitwrap { margin-bottom: 16px; }
+.sitwrap .muted { margin-bottom: 6px; }
+.situation {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  background: #141414;
+  border: 1px solid #262626;
+  color: #f2f2f2;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 10px;
+  border-radius: 6px;
+  outline: none;
+}
+.situation:focus { border-color: #3ea6ff; }
+
+/* goal deadline field */
+.goaltop { gap: 8px; }
+.dl {
+  flex: none;
+  width: 92px;
+  background: #141414;
+  border: 1px solid #262626;
+  color: #cfcfcf;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  outline: none;
+  margin-left: auto;
+}
+.dl:focus { border-color: #3ea6ff; }
+.goaltop .mini { flex: none; }

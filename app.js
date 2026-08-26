@@ -624,6 +624,74 @@ function mergeEventBlocks(blocks, text) {
   return kept;
 }
 
+// ---- 데이터 백업 (브라우저 저장소는 지워질 수 있다: 사파리 7일 미접속 삭제, 용량 부족 시 오리진 통째 삭제) ----
+// API 키는 절대 내보내지 않는다. 백업 파일이 남에게 가도 키는 안 넘어간다.
+const DATA_KEYS = [K_PROFILE, K_PLANS, K_VISITS, K_ENERGY, K_NOTES, K_DONE, K_EVENTS];
+const K_BACKUP_AT = "loop.backup_at";
+const BACKUP_NAME = "loop-backup.json";
+function exportPayload() {
+  const data = {};
+  DATA_KEYS.forEach(function (k) {
+    try { const v = localStorage.getItem(k); if (v != null) data[k] = v; } catch (e) {}
+  });
+  return { app: "loop", version: 1, exportedAt: new Date().toISOString(), data: data };
+}
+// 백업을 되돌린다. 형식이 아니거나 깨진 항목은 건너뛴다. 되돌린 항목 수를 반환.
+function applyImport(payload) {
+  const p = (typeof payload === "string") ? JSON.parse(payload) : payload;
+  if (!p || p.app !== "loop" || !p.data || typeof p.data !== "object") throw new Error("LOOP 백업 파일이 아닙니다");
+  let n = 0;
+  DATA_KEYS.forEach(function (k) {
+    const v = p.data[k];
+    if (typeof v !== "string") return;
+    try { JSON.parse(v); } catch (e) { return; }
+    try { localStorage.setItem(k, v); n++; } catch (e) {}
+  });
+  if (!n) throw new Error("되돌릴 항목이 없습니다");
+  return n;
+}
+function lastBackupAt() { try { return localStorage.getItem(K_BACKUP_AT) || ""; } catch (e) { return ""; } }
+let dataMsg = "";
+// PC(크로미움)는 같은 파일에 덮어쓰기, 그 외에는 다운로드.
+async function downloadBackup() {
+  const text = JSON.stringify(exportPayload(), null, 2);
+  try {
+    if (typeof window !== "undefined" && window.showSaveFilePicker) {
+      const h = await window.showSaveFilePicker({ suggestedName: BACKUP_NAME, types: [{ description: "LOOP 백업", accept: { "application/json": [".json"] } }] });
+      const w = await h.createWritable(); await w.write(text); await w.close();
+    } else {
+      const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = BACKUP_NAME;
+      if (document.body) document.body.appendChild(a);
+      a.click();
+      if (a.remove) a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    }
+    try { localStorage.setItem(K_BACKUP_AT, new Date().toISOString()); } catch (e) {}
+    dataMsg = "내보냈습니다 · " + BACKUP_NAME;
+  } catch (e) { dataMsg = ""; }   // 사용자가 취소하면 아무 일도 없다
+  render();
+}
+function importBackup(file) {
+  if (!file) return;
+  const rd = new FileReader();
+  rd.onload = function () {
+    try { dataMsg = "되돌렸습니다 · 항목 " + applyImport(String(rd.result)) + "개"; }
+    catch (e) { dataMsg = "되돌리기 실패 · " + (e && e.message ? e.message : "형식 오류"); }
+    render();
+  };
+  rd.readAsText(file);
+}
+// 저장소를 지우지 말라고 브라우저에 요청한다(크로미움은 조용히 판단, 파이어폭스는 물어봄).
+function askPersist() {
+  try {
+    if (typeof navigator === "undefined" || !navigator.storage || !navigator.storage.persist) return;
+    if (navigator.storage.persisted) navigator.storage.persisted().then(function (ok) { if (!ok) navigator.storage.persist(); });
+    else navigator.storage.persist();
+  } catch (e) {}
+}
+
 function templatePlan(candidates) {
   const c = candidates || [];
   function study(i, time) {
@@ -661,6 +729,7 @@ function mapAIBlocks(aiBlocks, candidates) {
       goalId: ref ? ref.goalId : null,
       taskId: ref ? ref.taskId : null,
       place: String(b.place || "").slice(0, 24) || null,
+      first: String(b.first || "").slice(0, 40) || null,
       move: /^이동/.test(String(b.text || "")),
       core: !!b.core,
       done: false
@@ -729,9 +798,9 @@ function currentBlock(blocks, now) {
 function daySummary(plan) {
   const blocks = (plan && plan.blocks) || [];
   const core = blocks.filter(function (b) { return b.core; });
-  const onTime = core.filter(function (b) { return b.done && b.onTime; });
-  const late = core.filter(function (b) { return b.done && !b.onTime; });
-  const missed = core.filter(function (b) { return !b.done; });
+  const onTime = core.filter(function (b) { return b.onTime; });
+  const late = core.filter(function (b) { return (b.started || b.done) && !b.onTime; });
+  const missed = core.filter(function (b) { return !b.started && !b.done; });
   return {
     coreTotal: core.length,
     onTime: onTime.length,
@@ -741,17 +810,49 @@ function daySummary(plan) {
   };
 }
 
-// 핵심 카운터는 "정시 체크"만 인정
+// ---- 첫 동작: 그 자리에 도착해서 5분 안에 끝나는 물리적 동작 하나 ----
+// 시작이 막히는 지점은 "장소"가 아니라 "다음 몸동작"이 비어 있는 것이다.
+const FIRST_SKIP = /점심|저녁|아침|식사|휴식|산책|물 한 잔|눈 휴식|기상|취침|잠자/;
+function firstStep(block) {
+  const b = block || {};
+  if (b.first) return String(b.first);
+  const t = String(b.text || "");
+  if (b.move) return "지금 일어나서 나가기";
+  if (/수영|헬스|운동/.test(t)) return "옷 갈아입고 가방 챙기기";
+  if (b.event || FIRST_SKIP.test(t)) return null;
+  if (b.taskId || b.core || /집중|공부|복습|정리|풀기|강의|과제|독서|문제/.test(t)) {
+    const short = t.length > 26 ? (t.slice(0, 26) + "…") : t;
+    return "자리에 앉아 " + short + " · 5분만";
+  }
+  return null;
+}
+
+// 핵심 카운터는 "정시 착수"만 인정
 function coreStatus(blocks) {
   const core = (blocks || []).filter(function (b) { return b.core; });
   return {
-    done: core.filter(function (b) { return b.done && b.onTime; }).length,
-    late: core.filter(function (b) { return b.done && !b.onTime; }).length,
+    done: core.filter(function (b) { return b.onTime; }).length,           // 정시 착수
+    late: core.filter(function (b) { return (b.started || b.done) && !b.onTime; }).length,
+    fin: core.filter(function (b) { return b.done; }).length,
     total: core.length
   };
 }
 
 // toggle a block; sync its linked goal task
+// 착수 기록: 완료가 아니라 "시작했는가". 정시 판정은 여기서 한 번만 굳는다.
+function setBlockStarted(date, blockId, now) {
+  const plans = loadPlans();
+  const plan = plans[date];
+  if (!plan) return null;
+  const block = plan.blocks.find(function (b) { return b.id === blockId; });
+  if (!block || block.started) return block || null;
+  block.started = true;
+  block.startedAt = (now || new Date()).toISOString();
+  block.onTime = isOnTime(block, date, now);
+  savePlans(plans);
+  return block;
+}
+
 function setBlockDone(date, blockId, checked, now) {
   const plans = loadPlans();
   const plan = plans[date];
@@ -759,7 +860,15 @@ function setBlockDone(date, blockId, checked, now) {
   const block = plan.blocks.find(function (b) { return b.id === blockId; });
   if (!block) return;
   block.done = checked;
-  block.onTime = checked ? isOnTime(block, date, now) : false;
+  // 착수 기록 없이 완료부터 누른 경우엔 그 순간을 착수로 본다(예전 데이터와 같은 뜻).
+  if (checked && !block.started) {
+    block.started = true;
+    block.startedAt = (now || new Date()).toISOString();
+    block.onTime = isOnTime(block, date, now);
+  } else if (!checked && !block.startedAt) {
+    block.started = false;
+    block.onTime = false;
+  }
   if (checked) block.checkedAt = (now || new Date()).toISOString();
   savePlans(plans);
   if (block.taskId) {
@@ -817,10 +926,11 @@ async function aiGeneratePlan(candidates, targetDate, opts) {
     "이 사람은 쉽게 지치고 눈이 건조하다: 딥워크 사이에 '물 마시기·눈 휴식(먼 곳 보기)' 같은 짧은 회복 블록을 최소 2개 넣어라. " +
     "모든 블록에 place(장소)를 넣어라. 규칙: 연속 학습이 3시간 이상일 때만 카페, 그보다 짧으면 도서관. 고정 일정은 그 일정에 적힌 장소. 아침·밤 정리는 집. 운동은 [내 프로필]의 운동 장소. " +
         "장소가 바뀌면 그 사이에 이동 블록을 넣어라: text는 \"이동 · A → B\", place는 빈 문자열, core는 false. 이동 시간만큼 뒤 블록을 미뤄라. " +
+    "학습·운동 블록마다 first(첫 동작)를 넣어라: 그 장소에 도착해서 5분 안에 끝나는 물리적 동작 하나. 20자 내외로 아주 구체적으로('노트북 열고 3장 1번 문제만 읽기', '수경 챙겨서 탈의실 들어가기'). 추상적 표현 금지. 휴식·식사·이동에는 넣지 마라. " +
         "[특별 일정]이 있으면 그 시각을 그 일정 블록으로 채우고, 원래 그 시간에 넣으려던 학습은 다른 시간으로 옮겨라. 시각이 없는 일정은 그날 안의 적절한 시간에 넣어라. " +
     "meals에는 그날의 아침·점심·저녁을 제안한다. 규칙: [식단 조건]의 '지금 있는 재료'를 최대한 활용하고, 못 먹는 것은 반드시 제외하며, 조리 조건·목표(감량/증량/유지)·열량 추정치를 반영한다. 한 끼 20자 내외로 구체적으로. " +
     "shopping에는 지금 재료로 부족해서 사두면 좋은 것을 3~6개, 짧은 품목명으로 넣는다(이미 있다고 적힌 재료는 넣지 마라). 재료 정보가 없으면 shopping은 빈 배열. " +
-    "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"place\":\"중앙도서관\",\"ref\":0,\"core\":true}]," +
+    "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"place\":\"중앙도서관\",\"first\":\"노트북 열고 3장 1번만 읽기\",\"ref\":0,\"core\":true}]," +
     "\"meals\":{\"아침\":\"...\",\"점심\":\"...\",\"저녁\":\"...\"},\"shopping\":[\"품목1\",\"품목2\"]}";
   const ctx = profileContext(loadProfile());
   const evt = targetDate ? getEvent(targetDate) : "";
@@ -1020,6 +1130,35 @@ function markOpen(det, key) {
 }
 
 // 재렌더가 사용자의 작업을 삼키지 않도록 포커스·커서·열린 패널을 보존한다.
+// ---- 실행 모드: 지금 블록 하나만 남기고 전부 치운다 ----
+let focusId = null;      // 열어둔 블록 id
+let focusUntil = 0;      // 5분 타이머 종료 시각(ms). 0이면 안 돎
+let focusTick = null;
+function openFocus(id) { focusId = id; focusUntil = 0; render(); }
+function closeFocus() {
+  focusId = null; focusUntil = 0;
+  if (focusTick && typeof clearInterval !== "undefined") { clearInterval(focusTick); focusTick = null; }
+  render();
+}
+function startFive() {
+  focusUntil = Date.now() + 5 * 60 * 1000;
+  if (typeof setInterval !== "undefined" && !focusTick) {
+    focusTick = setInterval(function () {
+      if (!focusId || !focusUntil) return;
+      if (Date.now() >= focusUntil) focusUntil = 0;
+      render();
+    }, 1000);
+  }
+  render();
+}
+function focusNow() {
+  const date = todayStr(new Date());
+  const plan = loadPlans()[date];
+  if (!plan) return;
+  const cb = currentBlock(plan.blocks.filter(function (b) { return !b.done; }), new Date());
+  if (cb) openFocus(cb.block.id);
+}
+
 function render() {
   const root = document.getElementById("screen");
   if (!root) return;
@@ -1034,15 +1173,20 @@ function render() {
   } catch (e) {}
 
   root.innerHTML = "";
-  root.appendChild(renderHero());
-  root.appendChild(renderToday());
-  root.appendChild(renderProgress());
-  const meals = renderMeals();
-  if (meals) root.appendChild(meals);
-  root.appendChild(renderNote());
-  root.appendChild(renderFlow());
-  root.appendChild(renderSettings());
-  root.appendChild(renderFooter());
+  const foc = renderFocus();
+  if (foc) {
+    root.appendChild(foc);
+  } else {
+    root.appendChild(renderHero());
+    root.appendChild(renderToday());
+    root.appendChild(renderProgress());
+    const meals = renderMeals();
+    if (meals) root.appendChild(meals);
+    root.appendChild(renderNote());
+    root.appendChild(renderFlow());
+    root.appendChild(renderSettings());
+    root.appendChild(renderFooter());
+  }
 
   // 2) 같은 필드를 다시 찾아 포커스와 커서 위치를 되돌림
   if (restore) {
@@ -1069,6 +1213,89 @@ function bindField(node, key, save) {
   return node;
 }
 
+// 실행 모드 화면. 지금 블록 하나 + 첫 동작 + 남은 시간. 아무것도 평가하지 않는다.
+// ISO 문자열은 UTC다. 화면에는 내 시각으로 보여준다.
+function localHHMM(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+}
+function renderFocus() {
+  if (!focusId) return null;
+  const now = new Date();
+  const date = todayStr(now);
+  const plan = loadPlans()[date];
+  const b = plan && plan.blocks.find(function (x) { return x.id === focusId; });
+  if (!b) { focusId = null; return null; }
+
+  const box = el("section", { cls: "focus" });
+  const head = el("div", { cls: "fhead" });
+  head.appendChild(el("span", { cls: "ftime", text: b.time }));
+  if (b.place) head.appendChild(el("span", { cls: "place", text: b.place }));
+  const x = el("button", { cls: "mini fclose", text: "닫기" });
+  x.addEventListener("click", function () { closeFocus(); });
+  head.appendChild(x);
+  box.appendChild(head);
+
+  box.appendChild(el("h2", { cls: "fnow", text: b.text }));
+
+  const fs = firstStep(b);
+  if (fs) {
+    const f = el("div", { cls: "ffirst" });
+    f.appendChild(el("span", { cls: "flabel", text: "첫 동작" }));
+    f.appendChild(el("span", { cls: "ftext", text: fs }));
+    box.appendChild(f);
+  }
+
+  const st = blockStartMinutes(b.time), en = blockEndMinutes(b.time);
+  const cur = now.getHours() * 60 + now.getMinutes();
+  if (st != null && en != null && en > st) {
+    const pct = Math.max(0, Math.min(100, Math.round(((cur - st) / (en - st)) * 100)));
+    const bar = el("div", { cls: "fbar" });
+    const fill = el("div", { cls: "fbarfill" });
+    fill.style.width = pct + "%";
+    bar.appendChild(fill);
+    box.appendChild(bar);
+    box.appendChild(el("div", { cls: "muted", text: cur < st ? ((st - cur) + "분 뒤 시작") : (Math.max(0, en - cur) + "분 남음") }));
+  }
+
+  const row = el("div", { cls: "addrow" });
+  if (focusUntil && Date.now() < focusUntil) {
+    const left = Math.max(0, Math.ceil((focusUntil - Date.now()) / 1000));
+    row.appendChild(el("span", { cls: "ftimer", text: Math.floor(left / 60) + ":" + pad2(left % 60) }));
+    const stop = el("button", { cls: "mini", text: "그만" });
+    stop.addEventListener("click", function () { focusUntil = 0; render(); });
+    row.appendChild(stop);
+  } else {
+    const five = el("button", { cls: "mini bd", text: "5분만 시작" });
+    five.addEventListener("click", function () { setBlockStarted(date, b.id, new Date()); startFive(); });
+    row.appendChild(five);
+  }
+  if (!b.started) {
+    const sb = el("button", { cls: "mini", text: "시작 기록" });
+    sb.addEventListener("click", function () { setBlockStarted(date, b.id, new Date()); render(); });
+    row.appendChild(sb);
+  } else {
+    row.appendChild(el("span", { cls: "muted", text: "시작 " + localHHMM(b.startedAt) + (b.onTime ? " · 정시" : "") }));
+  }
+  if (!b.done) {
+    const db = el("button", { cls: "mini", text: "완료" });
+    db.addEventListener("click", function () { setBlockDone(date, b.id, true, new Date()); render(); });
+    row.appendChild(db);
+  } else {
+    row.appendChild(el("span", { cls: "muted", text: "완료됨" }));
+  }
+  box.appendChild(row);
+
+  const rest = plan.blocks.filter(function (x2) {
+    return x2.id !== b.id && !x2.done && (blockStartMinutes(x2.time) || 0) >= (st || 0);
+  });
+  const nx = currentBlock(rest, now);
+  if (nx) box.appendChild(el("div", { cls: "fnext", text: "끝나면 다음 · " + nx.block.time + " " + nx.block.text + (nx.block.place ? (" · " + nx.block.place) : "") }));
+  return box;
+}
+
 // landing/hero: what this app does + energy picker + the main action
 function renderHero() {
   const box = el("section", { cls: "hero" });
@@ -1089,10 +1316,12 @@ function renderHero() {
   if (todayPlan && !isTomorrow) {
     const cb = currentBlock(todayPlan.blocks.filter(function (b) { return !b.done; }), now);
     if (cb) {
-      const nowbar = el("div", { cls: "nowbar" + (cb.state === "now" ? " active" : "") });
+      const nowbar = el("button", { cls: "nowbar" + (cb.state === "now" ? " active" : "") });
       nowbar.appendChild(el("span", { cls: "nlabel", text: cb.state === "now" ? "지금" : "다음" }));
       nowbar.appendChild(el("span", { cls: "ntext", text: cb.block.text }));
       nowbar.appendChild(el("span", { cls: "ntime", text: cb.block.time }));
+      nowbar.appendChild(el("span", { cls: "ngo", text: "▶ 실행" }));
+      nowbar.addEventListener("click", function () { openFocus(cb.block.id); });
       box.appendChild(nowbar);
     }
   }
@@ -1101,7 +1330,7 @@ function renderHero() {
     text: "내 상황(수업·알바·리듬·목표)을 저장해두면, 버튼 한 번에 AI가 " +
       (isTomorrow ? "내일" : "오늘") + " 하루를 시간대별로 짜줍니다. " +
       "오전엔 집중 잘 되는 시간에 핵심 공부, 사이사이 물·눈 휴식, 점심·저녁과 운동, 밤엔 가볍게 마무리. " +
-      "그중 굵게 표시된 핵심 3개만 하면 그날은 성공입니다."
+      "그중 굵게 표시된 핵심 3개를 제시간에 시작하면 그날은 성공입니다."
   }));
 
   // energy picker — battery-aware planning
@@ -1385,7 +1614,7 @@ function renderToday() {
     const cs = coreStatus(plan.blocks);
     head.appendChild(el("span", {
       cls: "core" + (cs.done >= cs.total && cs.total ? " done" : ""),
-      text: "핵심 " + cs.done + "/" + cs.total + " 정시" + (cs.late ? (" · 늦음 " + cs.late) : "")
+      text: "착수 " + cs.done + "/" + cs.total + (cs.late ? (" · 늦음 " + cs.late) : "") + (cs.fin ? (" · 완료 " + cs.fin) : "")
     }));
   }
   box.appendChild(head);
@@ -1402,7 +1631,7 @@ function renderToday() {
     return box;
   }
 
-  box.appendChild(el("p", { cls: "muted onhint", text: "체크는 블록 시작시각 ±5분 안에 눌러야 “정시”로 인정됩니다. 늦게 눌러도 기록은 남아요." }));
+  box.appendChild(el("p", { cls: "muted onhint", text: "블록이 시작될 때 “시작”을 누르면 착수로 기록됩니다(±5분 안이면 정시). 체크는 다 끝냈을 때." }));
   const nowTick = new Date();
   const blocksWrap = el("div", { cls: "blocks" });
   plan.blocks.forEach(function (b) {
@@ -1418,9 +1647,19 @@ function renderToday() {
     row.appendChild(el("span", { cls: "txt", text: b.text }));
     if (b.place) row.appendChild(el("span", { cls: "place", text: b.place }));
     if (b.event) row.appendChild(el("span", { cls: "badge evtb", text: "일정" }));
-    if (b.done && !b.onTime) row.appendChild(el("span", { cls: "badge late", text: "늦음" }));
-    else if (b.done && b.onTime) row.appendChild(el("span", { cls: "badge ontime", text: "정시" }));
+    if (!b.started && !b.done && open) {
+      const sb = el("button", { cls: "mini startb", text: "시작" });
+      sb.addEventListener("click", function (e) {
+        if (e && e.preventDefault) e.preventDefault();
+        setBlockStarted(target, b.id, new Date());
+        openFocus(b.id);
+      });
+      row.appendChild(sb);
+    }
+    if (b.onTime) row.appendChild(el("span", { cls: "badge ontime", text: "착수" }));
+    else if (b.started || b.done) row.appendChild(el("span", { cls: "badge late", text: "늦음" }));
     else if (open) row.appendChild(el("span", { cls: "badge now", text: "지금" }));
+    if (b.done) row.appendChild(el("span", { cls: "badge fin", text: "완료" }));
     blocksWrap.appendChild(row);
   });
   box.appendChild(blocksWrap);
@@ -1443,7 +1682,10 @@ function renderToday() {
   }
   const brow = el("div", { cls: "addrow" });
   if (target === todayStr(new Date())) {
-    const rp = el("button", { cls: "mini bd", text: "⏱ 지금부터 다시 짜기" });
+    const fb = el("button", { cls: "mini bd", text: "▶ 실행 모드" });
+    fb.addEventListener("click", function () { focusNow(); });
+    brow.appendChild(fb);
+    const rp = el("button", { cls: "mini", text: "⏱ 지금부터 다시 짜기" });
     rp.disabled = generating;
     rp.addEventListener("click", function () { replanFromNow(); });
     brow.appendChild(rp);
@@ -1657,6 +1899,32 @@ function renderSettings() {
     mrow.appendChild(mc);
   }
   if (mrow.children.length) box.appendChild(mrow);
+
+  // ---- 데이터 (브라우저 저장소는 지워질 수 있다) ----
+  box.appendChild(el("div", { cls: "aihd", text: "데이터" }));
+  const lb = lastBackupAt();
+  box.appendChild(el("div", { cls: "muted", text: lb
+    ? ("마지막 백업 " + lb.slice(0, 10))
+    : "아직 백업한 적이 없습니다. 사파리는 7일 안 들어오면 저장 데이터를 지우고, 기기 용량이 부족하면 통째로 지워집니다." }));
+  const drow = el("div", { cls: "addrow" });
+  const eb = el("button", { cls: "mini bd", text: "⬇ 백업 내보내기" });
+  eb.addEventListener("click", function () { downloadBackup(); });
+  drow.appendChild(eb);
+  const fi = el("input");
+  fi.type = "file";
+  fi.setAttribute("accept", "application/json,.json");
+  fi.setAttribute("aria-label", "백업 파일에서 되돌리기");
+  fi.addEventListener("change", function () {
+    const file = fi.files && fi.files[0];
+    if (!file) return;
+    const okAsk = (typeof window !== "undefined" && window.confirm)
+      ? window.confirm("지금 저장된 계획·목표·기록을 백업 파일 내용으로 덮어씁니다. 진행할까요?") : true;
+    if (okAsk) importBackup(file); else fi.value = "";
+  });
+  drow.appendChild(fi);
+  box.appendChild(drow);
+  if (dataMsg) box.appendChild(el("div", { cls: "muted", text: dataMsg }));
+  box.appendChild(el("div", { cls: "muted", text: "API 키는 백업에 들어가지 않습니다." }));
   return box;
 }
 
@@ -1744,10 +2012,10 @@ function recentStats(today, days) {
     if (e && battery[e] != null) battery[e]++;
     if (!p) continue;
     const core = p.blocks.filter(function (b) { return b.core; });
-    const ot = core.filter(function (b) { return b.done && b.onTime; }).length;
+    const ot = core.filter(function (b) { return b.onTime; }).length;
     coreTotal += core.length;
     onTime += ot;
-    late += core.filter(function (b) { return b.done && !b.onTime; }).length;
+    late += core.filter(function (b) { return (b.started || b.done) && !b.onTime; }).length;
     const w = weekdayOf(d);
     if (!byWeekday[w]) byWeekday[w] = { core: 0, onTime: 0 };
     byWeekday[w].core += core.length;
@@ -1914,6 +2182,7 @@ function quoteFor(dateString) {
 
 // bootstrap: record visit, render. Plan is generated only on button press.
 function boot() {
+  askPersist();
   saveVisits(recordVisit(loadVisits(), todayStr()));
   render();
   if (notifyOn()) startNotifyLoop();
@@ -1929,7 +2198,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

@@ -381,3 +381,32 @@ button:disabled { opacity: 0.5; cursor: default; }
   background: var(--faint);
 }
 .block.isCore::before, .block.open::before { background: var(--accent); width: 11px; height: 2px; left: -13px; }
+
+/* 실행 모드 진입 — 지금/다음 줄 전체가 버튼 */
+.nowbar { width: 100%; text-align: left; border: none; cursor: pointer; font: inherit; color: inherit; }
+.nowbar:hover { background: var(--accent-soft); }
+.ngo { flex: none; font-size: 11px; font-weight: 800; color: var(--accent); letter-spacing: 0.04em; }
+
+/* 실행 모드 — 화면에 이것 하나만 남는다 */
+.focus {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 22px 20px 20px; margin: 0 0 16px;
+}
+.fhead { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.ftime { font-size: 13px; font-weight: 700; color: var(--dim); font-variant-numeric: tabular-nums; }
+.fclose { margin-left: auto; }
+.fnow { font-size: 22px; line-height: 1.35; font-weight: 700; margin: 0 0 16px; color: var(--ink); }
+.ffirst {
+  display: block; background: var(--accent-soft); border-radius: 10px;
+  padding: 14px 16px; margin: 0 0 16px;
+}
+.flabel { display: block; font-size: 10px; font-weight: 800; letter-spacing: 0.12em; color: var(--accent); margin-bottom: 6px; }
+.ftext { display: block; font-size: 18px; line-height: 1.45; font-weight: 700; color: var(--ink); }
+.fbar { height: 6px; border-radius: 3px; background: var(--neutral-soft); overflow: hidden; margin: 0 0 6px; }
+.fbarfill { height: 100%; background: var(--accent); }
+.ftimer { font-size: 20px; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; align-self: center; }
+.fnext { margin-top: 14px; font-size: 13px; color: var(--dim); line-height: 1.5; }
+
+/* 착수 */
+.startb { flex: none; margin-left: auto; }
+.badge.fin { color: var(--dim); margin-left: 6px; }

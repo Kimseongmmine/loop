@@ -587,7 +587,9 @@ function insertCommutes(blocks, rulesOrMin) {
       const from = absorb ? bs : st;
       const rest = absorb ? Math.max(0, n - (be - bs)) : n;
       if (absorb) out.pop();
-      if ((en - (st + rest)) >= MIN_BLOCK_MIN) {
+      // 특별 일정은 시각이 고정이다 — 이동 때문에 병원 14:00 이 밀리면 안 된다
+      const canShift = !b.event;
+      if ((en - (st + rest)) >= MIN_BLOCK_MIN && (rest === 0 || canShift)) {
         out.push(moveBlock(from, st + rest, prev, b.place));
         if (rest > 0) {
           const moved = {};
@@ -928,6 +930,107 @@ function coreStatus(blocks) {
 }
 
 // toggle a block; sync its linked goal task
+// ---- 계획 고치기 ----
+// AI가 하루 뼈대를 정하고, 사용자는 자리만 바꾼다. 시각은 그대로 두고 내용을 옮긴다.
+// 이렇게 하면 특별 일정과 이미 지나간 블록이 밀려나지 않는다.
+
+// 옮길 수 있는 블록 — 이동·짧은 휴식은 파생물, 특별 일정은 시각이 고정 (순수)
+function editableBlocks(blocks) {
+  return (blocks || []).filter(function (b) { return !isMicroBlock(b) && !b.event; });
+}
+// 옮겨 다니는 것들. 자리에 남는 것(time·기록)과 구분한다.
+const CARRIED = ["text", "goalId", "taskId", "first", "core"];
+function swapSlots(blocks, idA, idB) {
+  const list = blocks || [];
+  const a = list.filter(function (b) { return b.id === idA; })[0];
+  const b2 = list.filter(function (b) { return b.id === idB; })[0];
+  if (!a || !b2 || a === b2) return list;
+  if (isMicroBlock(a) || isMicroBlock(b2) || a.event || b2.event) return list;
+  return list.map(function (b) {
+    if (b !== a && b !== b2) return b;
+    const other = (b === a) ? b2 : a;
+    const out = {};
+    Object.keys(b).forEach(function (k) { out[k] = b[k]; });
+    CARRIED.forEach(function (k) { out[k] = other[k]; });
+    return out;
+  });
+}
+// 한 칸 위/아래로 — 옮길 수 있는 블록끼리만 센다 (순수)
+function shiftBlock(blocks, id, dir) {
+  const movable = editableBlocks(blocks);
+  let i = -1;
+  movable.forEach(function (b, n) { if (b.id === id) i = n; });
+  const j = i + (dir < 0 ? -1 : 1);
+  if (i < 0 || j < 0 || j >= movable.length) return blocks;   // 끝이면 아무 일도 안 한다
+  return swapSlots(blocks, movable[i].id, movable[j].id);
+}
+// 그 자리의 과제만 갈아끼운다. first 는 지워서 firstStep 이 다시 만들게 한다. (순수)
+function swapTask(blocks, id, cand) {
+  if (!cand) return blocks;
+  return (blocks || []).map(function (b) {
+    if (b.id !== id) return b;
+    const out = {};
+    Object.keys(b).forEach(function (k) { out[k] = b[k]; });
+    out.text = String(cand.text || "").slice(0, 80);
+    out.goalId = cand.goalId || null;
+    out.taskId = cand.taskId || null;
+    out.first = null;
+    return out;
+  });
+}
+// 블록을 빼고 앞 블록을 그만큼 늘린다 — 구멍을 남기지 않는다 (순수)
+function dropBlock(blocks, id) {
+  const list = blocks || [];
+  let i = -1;
+  list.forEach(function (b, n) { if (b.id === id) i = n; });
+  if (i < 0 || list.length < 2) return list;
+  const gone = list[i];
+  const gs = blockStartMinutes(gone.time), ge = blockEndMinutes(gone.time);
+  const out = list.slice(0, i).concat(list.slice(i + 1));
+  const nb = i > 0 ? out[i - 1] : out[0];
+  const ns = blockStartMinutes(nb.time), ne = blockEndMinutes(nb.time);
+  if (gs != null && ge != null && ns != null && ne != null) {
+    const grown = {};
+    Object.keys(nb).forEach(function (k) { grown[k] = nb[k]; });
+    grown.time = (i > 0)
+      ? minToClock(ns) + "-" + minToClock(Math.max(ne, ge))       // 앞 블록이 뒤로 늘어남
+      : minToClock(Math.min(ns, gs)) + "-" + minToClock(ne);      // 첫 블록이면 뒤 블록이 당겨짐
+    out[i > 0 ? i - 1 : 0] = grown;
+  }
+  return out;
+}
+// 교체 후보 — 오늘 계획에 아직 안 들어간 미완료 과제. AI를 부르지 않는다.
+function swapCandidates(profile, blocks, limit) {
+  const used = {};
+  (blocks || []).forEach(function (b) { if (b.taskId) used[b.taskId] = true; });
+  return nextPendingTasks(profile, 12)
+    .filter(function (c) { return !used[c.taskId]; })
+    .slice(0, limit || 4);
+}
+// 모든 편집이 지나는 단 하나의 저장 경로.
+// 자리를 바꾸면 장소도 달라진다(11시 학습을 19시로 옮기면 도서관 -> 집 앞 스터디카페).
+// 그래서 이동 블록을 버리고 장소를 비운 뒤 다시 계산한다.
+function applyEdit(date, mutate) {
+  const plans = loadPlans();
+  const plan = plans[date];
+  if (!plan) return null;
+  const prof = loadProfile();
+  const before = plan.blocks.filter(function (b) { return !b.move; });
+  const edited = mutate(before);
+  if (!edited || edited === before) return null;                  // 옮길 데가 없으면 아무 일도 안 한다
+  const cleared = edited.map(function (b) {
+    if (b.event) return b;
+    const out = {};
+    Object.keys(b).forEach(function (k) { out[k] = b[k]; });
+    out.place = null;
+    return out;
+  });
+  plan.blocks = insertCommutes(fillPlaces(cleared, prof), placeRules(prof));
+  plan.editedAt = new Date().toISOString();
+  savePlans(plans);
+  return plan.blocks;
+}
+
 // 착수 기록: 완료가 아니라 "시작했는가". 정시 판정은 여기서 한 번만 굳는다.
 function setBlockStarted(date, blockId, now) {
   const plans = loadPlans();
@@ -1802,6 +1905,16 @@ function genButton(target, label) {
   return btn;
 }
 
+// 고치기 모드 — 켜기 전에는 없는 것과 같다.
+let editing = false;
+let dragId = null;      // 끄는 중인 블록 (PC 기본 드래그)
+let swapFor = null;     // 교체 서랍이 열린 블록
+function setEditing(v) {
+  editing = !!v;
+  if (!editing) { swapFor = null; dragId = null; }
+  render();
+}
+
 function renderToday() {
   const box = el("section", { cls: "today" });
   box.setAttribute("aria-label", "오늘 계획");
@@ -1820,8 +1933,15 @@ function renderToday() {
       text: "착수 " + cs.done + "/" + cs.total + (cs.late ? (" · 늦음 " + cs.late) : "") + (cs.fin ? (" · 완료 " + cs.fin) : "")
     }));
   }
+  if (plan && !generating) {
+    const ed = el("button", { cls: "mini edit" + (editing ? " on" : ""), text: editing ? "완료" : "✎ 고치기" });
+    ed.addEventListener("click", function () { setEditing(!editing); });
+    head.appendChild(ed);
+  }
   box.appendChild(head);
-  box.appendChild(el("p", { cls: "what", text: "블록이 시작될 때 “시작”(±5분이면 정시), 다 끝내면 체크. 핵심(●) 3개가 그날의 기준입니다." }));
+  box.appendChild(el("p", { cls: "what", text: editing
+    ? "≡ 를 끌어서 자리를 바꾸거나 ↑↓ 로 한 칸씩. ⇄ 는 다른 과제로 교체, ✕ 는 빼기. 시각은 그대로 두고 내용만 옮깁니다."
+    : "블록이 시작될 때 “시작”(±5분이면 정시), 다 끝내면 체크. 핵심(●) 3개가 그날의 기준입니다." }));
 
   if (generating) {
     const load = el("p", { cls: "muted", text: "AI가 계획 짜는 중…" });
@@ -1839,9 +1959,48 @@ function renderToday() {
   const blocksWrap = el("div", { cls: "blocks" });
 
   // 제 몫을 하는 블록 한 행
+  function editBtn(sym, label, fn) {
+    const b = el("button", { cls: "rowbtn", text: sym });
+    b.setAttribute("aria-label", label);
+    b.title = label;
+    b.addEventListener("click", function (e) {
+      if (e && e.preventDefault) e.preventDefault();   // 행이 label 이라 클릭이 체크박스로 샌다
+      fn();
+    });
+    return b;
+  }
+
   function fullRow(bk) {
     const open = !bk.done && isOnTime(bk, target, nowTick);
-    const row = el("label", { cls: "block" + (bk.core ? " isCore" : "") + (bk.event ? " isEvent" : "") + (bk.done ? " off" : "") + (open ? " open" : "") });
+    const movable = editing && !bk.event && !bk.done;
+    const row = el("label", { cls: "block" + (bk.core ? " isCore" : "") + (bk.event ? " isEvent" : "") + (bk.done ? " off" : "") + (open ? " open" : "") + (editing ? " editing" : "") + (dragId === bk.id ? " dragging" : "") });
+    if (movable) {
+      row.draggable = true;
+      row.addEventListener("dragstart", function (e) {
+        dragId = bk.id;
+        try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", bk.id); } catch (x) {}
+      });
+      row.addEventListener("dragover", function (e) {
+        if (!dragId || dragId === bk.id) return;
+        if (e && e.preventDefault) e.preventDefault();
+        row.className = row.className.indexOf("dropinto") < 0 ? (row.className + " dropinto") : row.className;
+      });
+      row.addEventListener("dragleave", function () {
+        row.className = row.className.replace(" dropinto", "");
+      });
+      row.addEventListener("drop", function (e) {
+        if (e && e.preventDefault) e.preventDefault();
+        const from = dragId;
+        dragId = null;
+        if (!from || from === bk.id) { render(); return; }
+        applyEdit(target, function (bs) { return swapSlots(bs, from, bk.id); });
+        render();
+      });
+      row.addEventListener("dragend", function () { dragId = null; render(); });
+      const h = el("span", { cls: "handle", text: "≡" });
+      h.setAttribute("aria-hidden", "true");
+      row.appendChild(h);
+    }
     const cb = el("input");
     cb.type = "checkbox";
     cb.checked = !!bk.done;
@@ -1852,6 +2011,27 @@ function renderToday() {
     row.appendChild(el("span", { cls: "txt", text: bk.text }));
     if (bk.place) row.appendChild(el("span", { cls: "place", text: bk.place }));
     if (bk.event) row.appendChild(el("span", { cls: "badge evtb", text: "일정" }));
+    if (editing) {
+      if (movable) {
+        const btns = el("span", { cls: "rowbtns" });
+        btns.appendChild(editBtn("↑", "한 칸 위로", function () {
+          applyEdit(target, function (bs) { return shiftBlock(bs, bk.id, -1); }); render();
+        }));
+        btns.appendChild(editBtn("↓", "한 칸 아래로", function () {
+          applyEdit(target, function (bs) { return shiftBlock(bs, bk.id, 1); }); render();
+        }));
+        btns.appendChild(editBtn("⇄", "다른 과제로 교체", function () {
+          swapFor = (swapFor === bk.id) ? null : bk.id; render();
+        }));
+        btns.appendChild(editBtn("✕", "이 블록 빼기", function () {
+          applyEdit(target, function (bs) { return dropBlock(bs, bk.id); }); render();
+        }));
+        row.appendChild(btns);
+      } else {
+        row.appendChild(el("span", { cls: "badge evtb", text: bk.done ? "완료" : "고정" }));
+      }
+      return row;
+    }
     if (!bk.started && !bk.done && open) {
       const sb = el("button", { cls: "mini startb", text: "시작" });
       sb.addEventListener("click", function (e) {
@@ -1868,6 +2048,31 @@ function renderToday() {
     return row;
   }
 
+  // 교체 서랍 — ⇄ 를 눌렀을 때 그 행 아래에만 열린다. AI를 부르지 않는다.
+  function swapDrawer() {
+    const wrap = el("div", { cls: "swapdrawer" });
+    wrap.appendChild(el("div", { cls: "sdlabel", text: "이 자리에 대신 넣을 것" }));
+    const cands = swapCandidates(loadProfile(), plan.blocks, 4);
+    if (!cands.length) {
+      wrap.appendChild(el("div", { cls: "muted", text: "남은 과제가 없습니다. 목표 탭에서 과제를 추가하세요." }));
+      return wrap;
+    }
+    cands.forEach(function (c) {
+      const b = el("button", { cls: "sdrow" });
+      b.appendChild(el("span", { cls: "sdtext", text: c.text }));
+      b.appendChild(el("span", { cls: "sdgoal", text: c.goalTitle }));
+      b.addEventListener("click", function (e) {
+        if (e && e.preventDefault) e.preventDefault();
+        const id = swapFor;
+        swapFor = null;
+        applyEdit(target, function (bs) { return swapTask(bs, id, c); });
+        render();
+      });
+      wrap.appendChild(b);
+    });
+    return wrap;
+  }
+
   // 10분 휴식·이동 — 체크할 것이 없으므로 얇은 실선 한 줄로 둔다
   function microRow(bk) {
     const st = blockStartMinutes(bk.time), en = blockEndMinutes(bk.time);
@@ -1879,10 +2084,20 @@ function renderToday() {
     return row;
   }
 
-  function rowFor(bk) { return isMicroBlock(bk) ? microRow(bk) : fullRow(bk); }
+  function rowFor(bk) {
+    const row = isMicroBlock(bk) ? microRow(bk) : fullRow(bk);
+    if (editing && swapFor === bk.id) {
+      const holder = el("div", { cls: "rowholder" });
+      holder.appendChild(row);
+      holder.appendChild(swapDrawer());
+      return holder;
+    }
+    return row;
+  }
 
-  function group(key, label, list) {
+  function group(key, label, list, forceOpen) {
     const d = markOpen(el("details", { cls: "daygroup" }), key + ":" + target);
+    if (forceOpen) d.open = true;
     d.appendChild(el("summary", { text: label }));
     list.forEach(function (bk) { d.appendChild(rowFor(bk)); });
     return d;
@@ -1901,7 +2116,7 @@ function renderToday() {
     const lc = coreStatus(parts.later);
     blocksWrap.appendChild(group("later", "이따 " + parts.later.length + "개" +
       (spanText(parts.later) ? (" (" + spanText(parts.later) + ")") : "") +
-      (lc.total ? (" · 핵심 " + lc.total) : ""), parts.later));
+      (lc.total ? (" · 핵심 " + lc.total) : ""), parts.later, editing));
   }
   box.appendChild(blocksWrap);
   // 적어둔 특별 일정이 지금 계획에 안 들어가 있으면 사실만 알린다
@@ -2579,7 +2794,7 @@ function boot() {
   } catch (e) {}
   // 현재/다음 블록 표시가 시간이 지나면 갱신되도록 1분마다 리렌더
   if (typeof setInterval !== "undefined") {
-    setInterval(function () { if (!generating && !breaking) render(); }, 60000);
+    setInterval(function () { if (!generating && !breaking && !dragId) render(); }, 60000);
   }
 }
 
@@ -2589,7 +2804,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

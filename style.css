@@ -520,3 +520,44 @@ section.settings, section.goals {
 .daygroup > summary::before { content: "▸"; color: var(--faint); font-weight: 400; }
 .daygroup[open] > summary::before { content: "▾"; }
 .daygroup[open] > summary { margin-bottom: 6px; }
+
+/* ===== 계획 고치기 (v2.2) ===== */
+.mini.edit { flex: none; }
+.mini.edit.on { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+
+.block.editing { cursor: grab; }
+.block.editing input[type="checkbox"] { pointer-events: none; opacity: 0.4; }
+.block.dragging { opacity: 0.45; cursor: grabbing; }
+.block.dropinto { box-shadow: inset 0 2px 0 0 var(--accent); }
+
+.handle {
+  flex: none; color: var(--faint); font-size: 15px; line-height: 1;
+  cursor: grab; user-select: none; padding: 0 2px;
+}
+.block.editing:hover .handle { color: var(--accent); }
+
+.rowbtns { flex: none; margin-left: auto; display: flex; gap: 2px; }
+.rowbtn {
+  min-width: 30px; min-height: 30px; padding: 0 6px;
+  font-size: 13px; line-height: 1; color: var(--muted);
+  background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+  cursor: pointer;
+}
+.rowbtn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 교체 서랍 — ⇄ 를 누른 행 아래에만 */
+.rowholder { display: block; }
+.swapdrawer {
+  margin: 2px 0 8px 26px; padding: 10px 12px;
+  background: var(--neutral-soft); border-radius: 9px;
+}
+.sdlabel { font-size: 10px; font-weight: 800; letter-spacing: 0.12em; color: var(--muted); margin-bottom: 7px; }
+.sdrow {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+  padding: 8px 10px; margin-bottom: 4px; min-height: 36px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 7px;
+  cursor: pointer; font: inherit; color: inherit;
+}
+.sdrow:hover { border-color: var(--accent); }
+.sdtext { font-size: 13px; font-weight: 600; color: var(--ink); }
+.sdgoal { margin-left: auto; flex: none; font-size: 11px; color: var(--dim); }

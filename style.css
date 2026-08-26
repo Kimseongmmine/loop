@@ -228,6 +228,10 @@ h2 {
 .block.isCore .txt { color: var(--ink); font-weight: 700; }
 .block:not(.isCore) .txt { color: var(--muted); }
 .block.off .txt { text-decoration: line-through; color: var(--dim); }
+.place { font-size: 12px; color: var(--dim); white-space: nowrap; }
+.block.isCore .place { color: var(--muted); }
+.block.isMove { opacity: 0.72; }
+.block.isMove .txt { color: var(--faint); font-size: 14px; }
 
 input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--accent); flex: none; }
 

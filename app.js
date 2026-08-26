@@ -27,7 +27,8 @@ const PROFILE_FIELDS = [
   { key: "fixed", label: "고정 일정 (수업·알바)", ph: "예: 월수금 9-12 전공수업 / 화 알바 18-22 / 목 공강" },
   { key: "rhythm", label: "하루 리듬", ph: "예: 8시 기상 1시 취침 / 오전 집중 잘됨 / 밥 먹고 나면 졸림" },
   { key: "traits", label: "나의 특성", ph: "예: 쉽게 지침 / 1시간 넘으면 딴짓 / 시작이 어려움" },
-  { key: "prefs", label: "선호·비선호", ph: "예: 운동은 수영 / 아침 일찍은 싫음 / 카페에서 집중 잘됨" }
+  { key: "prefs", label: "선호·비선호", ph: "예: 운동은 수영 / 아침 일찍은 싫음 / 카페에서 집중 잘됨" },
+  { key: "places", label: "자주 가는 장소 · 이동 시간", ph: "예: 경북대 중앙도서관 / 집 책상 / 카페는 3시간 이상 앉을 때만 / 수영장 · 집→학교 25분" }
 ];
 
 // 식단 강화용 필드. 전부 선택이며, 채운 것만 AI에 전달된다.
@@ -72,11 +73,14 @@ function mealContext(profile, now) {
   return lines.join("\n");
 }
 
+const DEFAULT_PLACES = "경북대 중앙도서관 / 집 책상 / 카페는 3시간 이상 앉을 때만 / 수영장";
 function loadProfile() {
   const p = lsGet(K_PROFILE, { goals: [] });
   if (!p || !Array.isArray(p.goals)) return { goals: [] };
   // migrate legacy `situation` -> `traits`
   if (p.situation && !p.traits) { p.traits = p.situation; delete p.situation; }
+  // 빈 입력창을 만들지 않는다(원칙 1). 한 번도 손대지 않았을 때만 기본 장소를 채워둔다.
+  if (p.places === undefined) p.places = DEFAULT_PLACES;
   return p;
 }
 function saveProfile(p) { lsSet(K_PROFILE, p); }
@@ -92,6 +96,8 @@ function profileContext(profile) {
   if (r) lines.push("하루 리듬(기상~취침 안에서, 집중 잘 되는 시간에 핵심 배치): " + r);
   if (t) lines.push("나의 특성(강도·휴식 조절에 반영): " + t);
   if (pr) lines.push("선호·비선호: " + pr);
+  const pl = (profile.places || "").trim();
+  if (pl) lines.push("자주 가는 장소·이동 시간(각 블록의 place로 쓸 것): " + pl);
   const deadlines = (profile.goals || [])
     .filter(function (g) { return g.deadline; })
     .map(function (g) { return "- " + g.title + ": 마감 " + g.deadline; });
@@ -474,6 +480,84 @@ async function aiChat(messages, maxTokens, parse) {
 
 // ---- plan building (pure) ----
 // fixed realistic schedule; core = up to 3 study blocks carrying a task
+// ---- 장소 (어디서 할지까지 정해두면 시작 마찰이 준다) ----
+const LONG_STUDY_MIN = 180;   // 이 이상 앉을 때만 카페, 그보다 짧으면 도서관
+const MIN_BLOCK_MIN = 20;     // 이동을 끼워 넣고도 이만큼은 남아야 한다
+function minToClock(min) {
+  const m = ((min % 1440) + 1440) % 1440;
+  return pad2(Math.floor(m / 60)) + ":" + pad2(m % 60);
+}
+// 프로필 장소 텍스트에서 쓸 이름과 이동 시간을 뽑는다 (순수)
+function placeRules(profile) {
+  const t = String((profile && profile.places) || "");
+  const seg = t.split(/[\/,·\n]+/).map(function (x) { return x.trim(); }).filter(Boolean);
+  function pick(keys, fallback) {
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      for (let j = 0; j < seg.length; j++) {
+        const idx = seg[j].indexOf(k);
+        if (idx >= 0) return seg[j].slice(0, idx + k.length);
+      }
+    }
+    return fallback;
+  }
+  const mm = t.match(/(\d{1,3})\s*분/);
+  return {
+    lib: pick(["도서관", "독서실"], "도서관"),
+    cafe: pick(["스터디카페", "카페"], "카페"),
+    gym: pick(["수영장", "헬스장", "체육관"], "운동"),
+    home: pick(["집"], "집"),
+    commuteMin: mm ? Math.max(5, Math.min(120, Number(mm[1]))) : 20
+  };
+}
+// place 가 비어 있는 블록만 규칙으로 채운다. 사용자가 적은 특별 일정은 건드리지 않는다. (순수)
+function fillPlaces(blocks, profile) {
+  const r = placeRules(profile || {});
+  let prev = null;
+  return (blocks || []).map(function (b) {
+    if (b.move) return b;
+    if (b.place || b.event) { if (b.place) prev = b.place; return b; }
+    const st = blockStartMinutes(b.time), en = blockEndMinutes(b.time);
+    const len = (st != null && en != null) ? en - st : 0;
+    const t = String(b.text || "");
+    let place;
+    if (/수영|헬스|운동/.test(t)) place = r.gym;
+    else if (/기상|취침|잠자|샤워/.test(t)) place = r.home;
+    else if (b.taskId || b.core || /집중|공부|복습|정리|풀기|강의|과제|독서/.test(t)) place = len >= LONG_STUDY_MIN ? r.cafe : r.lib;
+    else if (/점심|저녁|아침|식사|휴식|산책|물|눈|쉬/.test(t)) place = (prev && prev !== r.gym) ? prev : r.home;
+    else place = prev || r.home;
+    if (st != null && st >= 21 * 60 && !/수영|헬스|알바|수업/.test(t)) place = r.home;   // 밤엔 집
+    prev = place;
+    const out = {};
+    Object.keys(b).forEach(function (k) { out[k] = b[k]; });
+    out.place = place;
+    return out;
+  });
+}
+// 장소가 바뀌는 지점에 이동 블록을 끼운다. 템플릿은 빈틈이 없으므로 뒤 블록의 시작을 미룬다. (순수)
+function insertCommutes(blocks, commuteMin) {
+  const n = Math.max(5, commuteMin || 20);
+  const out = [];
+  let prev = null;
+  (blocks || []).forEach(function (b) {
+    const st = blockStartMinutes(b.time), en = blockEndMinutes(b.time);
+    if (b.place && prev && b.place !== prev && st != null && en != null && (en - (st + n)) >= MIN_BLOCK_MIN) {
+      out.push({
+        id: genId("b"), time: minToClock(st) + "-" + minToClock(st + n),
+        text: "이동 · " + prev + " → " + b.place,
+        place: null, goalId: null, taskId: null, core: false, done: false, move: true
+      });
+      const moved = {};
+      Object.keys(b).forEach(function (k) { moved[k] = b[k]; });
+      moved.time = minToClock(st + n) + "-" + minToClock(en);
+      b = moved;
+    }
+    if (b.place) prev = b.place;
+    out.push(b);
+  });
+  return out;
+}
+
 // ---- 특별 일정 (그날 하루만 있는 예외 일정) ----
 const K_EVENTS = "loop.events";   // { "YYYY-MM-DD": "14:00 병원 / 19시-21시 알바" }
 function loadEvents() { return lsGet(K_EVENTS, {}) || {}; }
@@ -576,6 +660,8 @@ function mapAIBlocks(aiBlocks, candidates) {
       text: String((ref ? (b.text || ref.text) : b.text) || "").slice(0, 80),
       goalId: ref ? ref.goalId : null,
       taskId: ref ? ref.taskId : null,
+      place: String(b.place || "").slice(0, 24) || null,
+      move: /^이동/.test(String(b.text || "")),
       core: !!b.core,
       done: false
     };
@@ -729,10 +815,12 @@ async function aiGeneratePlan(candidates, targetDate, opts) {
     "후보 과제를 시간표에 배치하고(각 블록 ref에 후보 index), 휴식/식사/운동/고정일정 같은 생활 블록은 ref 없이 넣어라. " +
     "가장 중요한 3개 학습 블록에만 core:true. " +
     "이 사람은 쉽게 지치고 눈이 건조하다: 딥워크 사이에 '물 마시기·눈 휴식(먼 곳 보기)' 같은 짧은 회복 블록을 최소 2개 넣어라. " +
-    "[특별 일정]이 있으면 그 시각을 그 일정 블록으로 채우고, 원래 그 시간에 넣으려던 학습은 다른 시간으로 옮겨라. 시각이 없는 일정은 그날 안의 적절한 시간에 넣어라. " +
+    "모든 블록에 place(장소)를 넣어라. 규칙: 연속 학습이 3시간 이상일 때만 카페, 그보다 짧으면 도서관. 고정 일정은 그 일정에 적힌 장소. 아침·밤 정리는 집. 운동은 [내 프로필]의 운동 장소. " +
+        "장소가 바뀌면 그 사이에 이동 블록을 넣어라: text는 \"이동 · A → B\", place는 빈 문자열, core는 false. 이동 시간만큼 뒤 블록을 미뤄라. " +
+        "[특별 일정]이 있으면 그 시각을 그 일정 블록으로 채우고, 원래 그 시간에 넣으려던 학습은 다른 시간으로 옮겨라. 시각이 없는 일정은 그날 안의 적절한 시간에 넣어라. " +
     "meals에는 그날의 아침·점심·저녁을 제안한다. 규칙: [식단 조건]의 '지금 있는 재료'를 최대한 활용하고, 못 먹는 것은 반드시 제외하며, 조리 조건·목표(감량/증량/유지)·열량 추정치를 반영한다. 한 끼 20자 내외로 구체적으로. " +
     "shopping에는 지금 재료로 부족해서 사두면 좋은 것을 3~6개, 짧은 품목명으로 넣는다(이미 있다고 적힌 재료는 넣지 마라). 재료 정보가 없으면 shopping은 빈 배열. " +
-    "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"ref\":0,\"core\":true}]," +
+    "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"place\":\"중앙도서관\",\"ref\":0,\"core\":true}]," +
     "\"meals\":{\"아침\":\"...\",\"점심\":\"...\",\"저녁\":\"...\"},\"shopping\":[\"품목1\",\"품목2\"]}";
   const ctx = profileContext(loadProfile());
   const evt = targetDate ? getEvent(targetDate) : "";
@@ -847,10 +935,14 @@ async function generatePlan(targetDate, opts) {
     let blocks = null, meals = null, shopping = null, source = "template";
     if (aiOn) {
       const res = await aiGeneratePlan(candidates, targetDate, opts);
-      if (res) { blocks = res.blocks; meals = res.meals; shopping = res.shopping; source = "ai"; }
+      if (res) { blocks = fillPlaces(res.blocks, loadProfile()); meals = res.meals; shopping = res.shopping; source = "ai"; }
     }
     if (!blocks) {
-      blocks = mergeEventBlocks(templatePlan(candidates), getEvent(targetDate));
+      const prof = loadProfile();
+      blocks = insertCommutes(
+        fillPlaces(mergeEventBlocks(templatePlan(candidates), getEvent(targetDate)), prof),
+        placeRules(prof).commuteMin
+      );
       if (opts.fromTime) {
         // 템플릿 폴백에서도 지나간 블록은 버림
         const cutoff = blockStartMinutes(opts.fromTime);
@@ -1315,7 +1407,7 @@ function renderToday() {
   const blocksWrap = el("div", { cls: "blocks" });
   plan.blocks.forEach(function (b) {
     const open = !b.done && isOnTime(b, target, nowTick);
-    const row = el("label", { cls: "block" + (b.core ? " isCore" : "") + (b.event ? " isEvent" : "") + (b.done ? " off" : "") + (open ? " open" : "") });
+    const row = el("label", { cls: "block" + (b.core ? " isCore" : "") + (b.event ? " isEvent" : "") + (b.move ? " isMove" : "") + (b.done ? " off" : "") + (open ? " open" : "") });
     const cb = el("input");
     cb.type = "checkbox";
     cb.checked = !!b.done;
@@ -1324,6 +1416,7 @@ function renderToday() {
     row.appendChild(el("span", { cls: "time", text: b.time }));
     if (b.core) { const dotm = el("span", { cls: "coremark", text: "●" }); dotm.setAttribute("aria-hidden", "true"); row.appendChild(dotm); }
     row.appendChild(el("span", { cls: "txt", text: b.text }));
+    if (b.place) row.appendChild(el("span", { cls: "place", text: b.place }));
     if (b.event) row.appendChild(el("span", { cls: "badge evtb", text: "일정" }));
     if (b.done && !b.onTime) row.appendChild(el("span", { cls: "badge late", text: "늦음" }));
     else if (b.done && b.onTime) row.appendChild(el("span", { cls: "badge ontime", text: "정시" }));
@@ -1836,7 +1929,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

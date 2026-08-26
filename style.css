@@ -72,7 +72,6 @@ html, body {
 /* wide screens: 탭마다 페이지가 짧아졌으므로 한 줄로 세우고 가운데만 넓힌다 */
 @media (min-width: 900px) {
   #screen { max-width: 760px; }
-  .tabbar { max-width: 760px; left: 50%; transform: translateX(-50%); border-radius: 14px 14px 0 0; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
 }
 
 /* cards */
@@ -448,6 +447,15 @@ body { padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
   padding: 6px 0 calc(6px + env(safe-area-inset-bottom, 0px));
   background: var(--card); border-top: 1px solid var(--line);
 }
+/* 넓은 화면에서는 가운데로. 이 규칙은 반드시 위 기본 규칙 **뒤에** 있어야 한다 */
+@media (min-width: 900px) {
+  .tabbar {
+    left: 50%; right: auto; transform: translateX(-50%);
+    width: 760px; max-width: 100vw;
+    border-radius: 14px 14px 0 0;
+    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+  }
+}
 .tab {
   flex: 1 1 0; display: flex; flex-direction: column; align-items: center; gap: 3px;
   padding: 6px 2px; min-height: 48px;
@@ -561,3 +569,17 @@ section.settings, section.goals {
 .sdrow:hover { border-color: var(--accent); }
 .sdtext { font-size: 13px; font-weight: 600; color: var(--ink); }
 .sdgoal { margin-left: auto; flex: none; font-size: 11px; color: var(--dim); }
+
+/* 메인으로 돌아가기 */
+.homebtn {
+  display: flex; align-items: baseline; gap: 8px;
+  background: none; border: none; padding: 0; margin: 0;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.homebtn:hover .brand { color: var(--accent); }
+.backbtn {
+  flex: none; font-size: 12px; font-weight: 700; padding: 6px 11px; min-height: 32px;
+  color: var(--accent); background: var(--accent-soft);
+  border: 1px solid transparent; border-radius: 999px; cursor: pointer;
+}
+.backbtn:hover { border-color: var(--accent); }

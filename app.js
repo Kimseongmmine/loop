@@ -1357,11 +1357,22 @@ function goTab(k) {
 }
 function renderTopbar() {
   const bar = el("header", { cls: "topbar" });
-  const mark = el("div", { cls: "mark" });
+  const tab = currentTab();
+  // 로고가 곧 홈 버튼이다
+  const mark = el("button", { cls: "mark homebtn" });
+  mark.setAttribute("aria-label", "오늘 화면으로");
+  mark.title = "오늘 화면으로";
   const ring = svgRing();
   if (ring) mark.appendChild(ring);
   mark.appendChild(el("h1", { cls: "brand", text: "LOOP" }));
+  mark.addEventListener("click", function () { goTab("today"); });
   bar.appendChild(mark);
+  // 다른 화면에 들어와 있으면 돌아가는 길을 눈에 보이게 둔다
+  if (tab !== "today") {
+    const back = el("button", { cls: "backbtn", text: "← 오늘" });
+    back.addEventListener("click", function () { goTab("today"); });
+    bar.appendChild(back);
+  }
   const now = new Date();
   const target = activeDate(now);
   const streak = computeStreak(loadVisits(), todayStr(now));
@@ -1505,6 +1516,9 @@ function renderFocus() {
   const x = el("button", { cls: "mini fclose", text: "닫기" });
   x.addEventListener("click", function () { closeFocus(); });
   head.appendChild(x);
+  const home = el("button", { cls: "mini", text: "오늘 계획" });
+  home.addEventListener("click", function () { goTab("today"); });
+  head.appendChild(home);
   box.appendChild(head);
 
   box.appendChild(el("h2", { cls: "fnow", text: b.text }));

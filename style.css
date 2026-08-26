@@ -493,3 +493,30 @@ section.settings, section.goals {
 .elchip.zero { opacity: 0.55; }
 
 .tstreak { font-size: 12px; font-weight: 700; color: var(--accent); }
+
+/* ===== 계획표 줄이기 (v2.1) ===== */
+/* 10분 휴식·이동: 체크할 게 없으니 얇은 실선 한 줄 */
+.microrow {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 3px 0 3px 26px; min-height: 0;
+  font-size: 12px; color: var(--faint);
+  border-left: 1px dashed var(--line); margin-left: 3px;
+}
+.mtime { flex: none; font-variant-numeric: tabular-nums; }
+.mtxt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mlen { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
+.microrow.isMove .mtxt { color: var(--dim); }
+
+/* 지난 것 / 이따 — 접어둔다 */
+.daygroup { margin: 4px 0; }
+.daygroup > summary {
+  cursor: pointer; list-style: none;
+  font-size: 12px; font-weight: 700; color: var(--muted);
+  padding: 9px 12px; min-height: 38px;
+  background: var(--neutral-soft); border-radius: 8px;
+  display: flex; align-items: center; gap: 6px;
+}
+.daygroup > summary::-webkit-details-marker { display: none; }
+.daygroup > summary::before { content: "▸"; color: var(--faint); font-weight: 400; }
+.daygroup[open] > summary::before { content: "▾"; }
+.daygroup[open] > summary { margin-bottom: 6px; }

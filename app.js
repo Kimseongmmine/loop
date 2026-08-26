@@ -1123,6 +1123,14 @@ function el(tag, opts) {
 // ---- render ----
 // 어떤 <details>가 열려 있었는지 기억해 재렌더 후 복원한다.
 const openPanels = {};
+// 기능 버튼에서 해당 카드로 데려간다. 테스트용 가짜 DOM에는 없는 API라 전부 감싼다.
+function scrollTo(id) {
+  try {
+    const n = document.getElementById(id);
+    if (n && n.scrollIntoView) n.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) {}
+}
+
 function markOpen(det, key) {
   det.open = !!openPanels[key];
   det.addEventListener("toggle", function () { openPanels[key] = det.open; });
@@ -1179,6 +1187,7 @@ function render() {
   } else {
     root.appendChild(renderHero());
     root.appendChild(renderToday());
+    root.appendChild(renderFortune());
     root.appendChild(renderProgress());
     const meals = renderMeals();
     if (meals) root.appendChild(meals);
@@ -1327,11 +1336,37 @@ function renderHero() {
   }
   box.appendChild(el("p", {
     cls: "lede",
-    text: "내 상황(수업·알바·리듬·목표)을 저장해두면, 버튼 한 번에 AI가 " +
-      (isTomorrow ? "내일" : "오늘") + " 하루를 시간대별로 짜줍니다. " +
-      "오전엔 집중 잘 되는 시간에 핵심 공부, 사이사이 물·눈 휴식, 점심·저녁과 운동, 밤엔 가볍게 마무리. " +
-      "그중 굵게 표시된 핵심 3개를 제시간에 시작하면 그날은 성공입니다."
+    text: "내 상황(수업·알바·리듬·목표)을 저장해두면 버튼 한 번에 AI가 " +
+      (isTomorrow ? "내일" : "오늘") + " 하루를 시간대별로 짭니다. " +
+      "굵게 표시된 핵심 3개를 제시간에 시작하면 그날은 성공입니다."
   }));
+
+  // 이 앱이 뭘 할 수 있는지 — 이름만 보고 바로 누를 수 있게
+  const guide = el("div", { cls: "guide" });
+  guide.appendChild(el("div", { cls: "glabel", text: "할 수 있는 것" }));
+  const todayHas = !!loadPlans()[todayStr(now)];
+  const mealsOn = mealsAvailable();
+  [
+    { icon: "▶", name: "실행 모드", what: "지금 할 것 하나만 크게. 첫 동작과 남은 시간이 같이 나옵니다",
+      off: !todayHas, offwhy: "오늘 계획을 먼저 만드세요", go: function () { focusNow(); } },
+    { icon: "🧩", name: "목표 쪼개기", what: "큰 목표를 AI가 60분짜리 과제로 나눠줍니다",
+      go: function () { openPanels.settings = true; render(); scrollTo("settings"); } },
+    { icon: "🍚", name: "식단 · 장보기", what: mealsOn ? "냉장고 재료로 오늘 세 끼와 장볼 것을 뽑습니다" : "설정에 냉장고 재료를 적으면 세 끼와 장보기 목록이 나옵니다",
+      go: function () { if (mealsOn) scrollTo("meals"); else { openPanels.settings = true; render(); scrollTo("settings"); } } },
+    { icon: "🀄", name: "오늘의 운세", what: "사주로 본 오늘의 결과 힘 실리는 시간대",
+      go: function () { scrollTo("fortune"); } },
+    { icon: "⬇", name: "백업", what: "계획·기록을 파일로 빼둡니다. 브라우저는 데이터를 지울 수 있습니다",
+      go: function () { downloadBackup(); } }
+  ].forEach(function (it) {
+    const b = el("button", { cls: "grow" + (it.off ? " goff" : "") });
+    b.appendChild(el("span", { cls: "gicon", text: it.icon }));
+    b.appendChild(el("span", { cls: "gname", text: it.name }));
+    b.appendChild(el("span", { cls: "gwhat", text: it.off ? it.offwhy : it.what }));
+    b.disabled = !!it.off;
+    b.addEventListener("click", function () { if (!it.off) it.go(); });
+    guide.appendChild(b);
+  });
+  box.appendChild(guide);
 
   // energy picker — battery-aware planning
   const eWrap = el("div", { cls: "energy" });
@@ -1439,7 +1474,9 @@ function renderNote() {
   const today = todayStr();
   const box = el("section", { cls: "note" });
   box.setAttribute("aria-label", "오늘 한 줄");
+  box.id = "note";
   box.appendChild(el("h2", { text: "오늘 한 줄" }));
+  box.appendChild(el("p", { cls: "what", text: "오늘 어땠는지 한 줄. 다음 계획을 짤 때 AI가 이걸 읽고 조정합니다." }));
 
   // 밤 결산 — 오늘 계획이 있으면 자동 요약
   const plan = loadPlans()[today];
@@ -1505,6 +1542,13 @@ function renderFooter() {
 }
 
 // meal suggestions for the active day (only when the AI produced them)
+// 식단 카드가 뜰 조건 — 기능 버튼이 죽은 버튼이 되지 않게 미리 안다
+function mealsAvailable() {
+  const now = new Date();
+  const plan = loadPlans()[activeDate(now)];
+  const profile = loadProfile();
+  return !!((plan && (plan.meals || plan.shopping)) || bodyStats(profile, now) || (profile.fridge || "").trim());
+}
 function renderMeals() {
   const now = new Date();
   const target = activeDate(now);
@@ -1518,7 +1562,9 @@ function renderMeals() {
 
   const box = el("section", { cls: "meals" });
   box.setAttribute("aria-label", "식단");
+  box.id = "meals";
   box.appendChild(el("h2", { text: "식단" }));
+  box.appendChild(el("p", { cls: "what", text: "설정에 적어둔 냉장고 재료·몸 상태로 AI가 뽑은 오늘 세 끼와 장볼 것." }));
 
   if (m) {
     [["아침", m.breakfast], ["점심", m.lunch], ["저녁", m.dinner]].forEach(function (pair) {
@@ -1553,8 +1599,10 @@ function renderMeals() {
 
 function renderProgress() {
   const box = el("section", { cls: "prog" });
+  box.id = "prog";
   box.setAttribute("aria-label", "목표 진행도");
   box.appendChild(el("h2", { text: "진행도" }));
+  box.appendChild(el("p", { cls: "what", text: "목표마다 과제가 몇 개 남았는지. 계획의 학습 블록을 체크하면 여기가 찹니다." }));
   const profile = loadProfile();
   if (!profile.goals.length) {
     box.appendChild(el("p", { cls: "muted", text: "아래 설정에서 목표를 추가하세요." }));
@@ -1609,6 +1657,7 @@ function renderToday() {
   const plan = loadPlans()[target];
 
   const head = el("div", { cls: "todayhead" });
+  box.id = "today";
   head.appendChild(el("h2", { text: (isTomorrow ? "내일 계획" : "오늘 계획") + " · " + dateWithWeekday(target) }));
   if (plan) {
     const cs = coreStatus(plan.blocks);
@@ -1618,6 +1667,7 @@ function renderToday() {
     }));
   }
   box.appendChild(head);
+  box.appendChild(el("p", { cls: "what", text: "AI가 짠 시간표. 블록이 시작될 때 “시작”, 다 끝내면 체크. 핵심(●) 3개가 그날의 기준입니다." }));
 
   if (generating) {
     const load = el("p", { cls: "muted", text: "AI가 계획 짜는 중…" });
@@ -1704,7 +1754,8 @@ function renderToday() {
 
 function renderSettings() {
   const box = markOpen(el("details", { cls: "settings" }), "settings");
-  const sum = el("summary", { text: "설정 · 목표" });
+  box.id = "settings";
+  const sum = el("summary", { text: "⚙ 설정 — 내 정보 · 목표 · 식단 재료 · AI 키 · 백업" });
   box.appendChild(sum);
 
   const profile = loadProfile();
@@ -1928,6 +1979,34 @@ function renderSettings() {
   return box;
 }
 
+// 오늘의 운세. 사주로 "무엇을 할 날인지"만 말하고, 나쁜 날이라고 하지 않는다.
+function renderFortune() {
+  const today = todayStr(new Date());
+  const f = dayFortune(today);
+  const box = el("section", { cls: "fortune" });
+  box.id = "fortune";
+  box.setAttribute("aria-label", "오늘의 운세");
+  box.appendChild(el("h2", { text: "오늘의 운세" }));
+  box.appendChild(el("p", { cls: "what", text: "사주(용신 水 · 희신 金)로 본 오늘 하루의 결. 오늘 뭘 하는 게 나은지만 말합니다." }));
+
+  const top = el("div", { cls: "frow " + f.tone.key });
+  top.appendChild(el("span", { cls: "fgz", text: f.gz }));
+  top.appendChild(el("span", { cls: "fel", text: f.el }));
+  top.appendChild(el("span", { cls: "ftone", text: f.tone.label }));
+  box.appendChild(top);
+  box.appendChild(el("p", { cls: "fact", text: f.act }));
+
+  const hwrap = el("div", { cls: "fhours" });
+  hwrap.appendChild(el("span", { cls: "llabel", text: "힘 실리는 시간" }));
+  f.hours.forEach(function (h) {
+    hwrap.appendChild(el("span", { cls: "hchip" + (h.on ? " on" : ""), text: h.label + " · " + h.el }));
+  });
+  box.appendChild(hwrap);
+  box.appendChild(el("p", { cls: "muted", text: "오전 " + BIRTH_HOUR + "시(" + hourBranch(BIRTH_HOUR) + "시) 출생 — 원국에 화가 하나 더 있어서 용신 水의 비중이 그만큼 큽니다." }));
+  box.appendChild(el("p", { cls: "muted", text: "일진은 달력 하루로 셉니다. 사주 원칙으로는 23시부터 다음 날입니다." }));
+  return box;
+}
+
 // ---- 대운 타임라인 (긴 호흡의 앵커; 접어둠) ----
 // ---- 세운(년운): 60갑자로 정확히 계산된다. 1984년 = 甲子 기준 ----
 const STEMS = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"];
@@ -1985,6 +2064,54 @@ function monthFlow(dateString, count) {
     out.push({ y: y, m: m, gz: gz, el: STEM_EL[gz[0]] + BRANCH_EL[gz[1]], tone: gzTone(gz) });
   }
   return out;
+}
+
+// ---- 일진(오늘의 간지) ----
+// 율리우스 적일로 60갑자를 센다. 기준점 두 개로 검증됨: 1900-01-01 = 甲戌, 2000-01-01 = 戊午.
+function julianDay(dateString) {
+  const p = String(dateString).split("-").map(Number);
+  const a = Math.floor((14 - p[1]) / 12);
+  const y = p[0] + 4800 - a;
+  const m = p[1] + 12 * a - 3;
+  return p[2] + Math.floor((153 * m + 2) / 5) + 365 * y
+    + Math.floor(y / 4) - Math.floor(y / 100) + Math.floor(y / 400) - 32045;
+}
+function dayPillar(dateString) {
+  const i = ((julianDay(dateString) + 49) % 60 + 60) % 60;
+  return STEMS[i % 10] + BRANCHES[i % 12];
+}
+
+// 출생 시각 10시 → 巳시. 시지는 23시부터 두 시간씩 끊는다.
+const BIRTH_HOUR = 10;
+const HOUR_BRANCHES = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"];
+function hourBranch(h) { return HOUR_BRANCHES[Math.floor((((h % 24) + 25) % 24) / 2)]; }
+
+// 용신 水 · 희신 金에 해당하는 시간대 중 하루 계획(9~24시) 안에 드는 것
+const GOOD_HOURS = [
+  { label: "15–17시", el: "금", br: "申" },
+  { label: "17–19시", el: "금", br: "酉" },
+  { label: "21–23시", el: "수", br: "亥" }
+];
+// 그날 무엇을 하라는 말만 한다. 그 사람을 평가하지 않는다.
+const DAY_ACT = {
+  "순풍": "벌이기 좋은 구간입니다. 미뤄둔 것 중 제일 큰 걸 오늘 시작하세요.",
+  "전환": "절반만 순풍입니다. 여러 개보다 하나를 끝까지 가는 쪽이 낫습니다.",
+  "축적": "쌓는 날입니다. 새로 벌이지 말고 하던 것을 이어서 하세요.",
+  "보통": "특별히 실리는 기운은 없습니다. 짜둔 계획대로 가면 됩니다."
+};
+function dayFortune(dateString) {
+  const gz = dayPillar(dateString);
+  const tone = gzTone(gz);
+  const has = {};
+  has[STEM_EL[gz[0]]] = true;
+  has[BRANCH_EL[gz[1]]] = true;
+  return {
+    gz: gz,
+    el: STEM_EL[gz[0]] + "·" + BRANCH_EL[gz[1]],
+    tone: tone,
+    act: DAY_ACT[tone.label] || DAY_ACT["보통"],
+    hours: GOOD_HOURS.map(function (h) { return { label: h.label, el: h.el, on: !!has[h.el] }; })
+  };
 }
 
 function yearFlow(fromYear, count) {
@@ -2079,8 +2206,10 @@ function renderFlow() {
   const now = new Date();
   const today = todayStr(now);
   const box = el("section", { cls: "flow" });
+  box.id = "flow";
   box.setAttribute("aria-label", "흐름");
   box.appendChild(el("h2", { text: "흐름" }));
+  box.appendChild(el("p", { cls: "what", text: "내 실제 기록 7일치 + 사주로 본 이번 달·올해 구간. 하루가 아니라 흐름을 봅니다." }));
 
   // --- 짧은 흐름: 사주가 아니라 실제 기록 ---
   const s = recentStats(today, 7);
@@ -2198,7 +2327,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, renderFortune, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

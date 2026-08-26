@@ -144,6 +144,28 @@ h2 {
 .echip { font-size: 13px; padding: 11px 16px; min-height: 44px; border-radius: 4px; letter-spacing: 0.02em; }
 .echip.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
 
+/* 특별 일정 — 그날 하루만의 예외 */
+.evt { margin-top: 16px; }
+.evtlabel { display: block; font-size: 13px; font-weight: 600; color: var(--ink); margin-bottom: 5px; }
+.evtinput {
+  width: 100%;
+  min-height: 52px;
+  resize: vertical;
+  background: var(--card);
+  border: 1px solid var(--field-line);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 9px 11px;
+  border-radius: 4px;
+  outline: none;
+}
+.evthint { font-size: 12px; color: var(--dim); margin-top: 5px; }
+.badge.evtb { color: var(--dim); }
+.block.isEvent { background: var(--neutral-soft); }
+.block.isEvent::before { background: var(--ink); width: 9px; height: 2px; left: -12px; }
+
 /* quote of the day */
 .quote {
   margin: 18px 0 0;

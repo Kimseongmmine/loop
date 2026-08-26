@@ -474,6 +474,72 @@ async function aiChat(messages, maxTokens, parse) {
 
 // ---- plan building (pure) ----
 // fixed realistic schedule; core = up to 3 study blocks carrying a task
+// ---- 특별 일정 (그날 하루만 있는 예외 일정) ----
+const K_EVENTS = "loop.events";   // { "YYYY-MM-DD": "14:00 병원 / 19시-21시 알바" }
+function loadEvents() { return lsGet(K_EVENTS, {}) || {}; }
+function getEvent(date) { const e = loadEvents()[date]; return e ? String(e) : ""; }
+function setEvent(date, text) {
+  const all = loadEvents();
+  const t = String(text || "").trim();
+  if (t) all[date] = t.slice(0, 400); else delete all[date];
+  lsSet(K_EVENTS, all);
+}
+
+function clockOf(h, m) {
+  const hh = Number(h); if (!(hh >= 0 && hh <= 24)) return null;
+  const mm = (m == null || m === "") ? 0 : Number(m); if (!(mm >= 0 && mm < 60)) return null;
+  return pad2(hh) + ":" + pad2(mm);
+}
+function addHour(clock) {
+  const c = clock.split(":");
+  return pad2((Number(c[0]) + 1) % 24) + ":" + c[1];
+}
+// "14:00 병원", "14시-16시 알바", "과제 마감" -> [{time|null, text}] (pure)
+// 시각으로 인정하는 표기는 ':' 또는 '시'가 붙은 경우뿐. ("1-10번 풀기"를 시간으로 오해하지 않도록)
+function parseEvents(text) {
+  const out = [];
+  String(text || "").split(/[\n,\u00b7]+/).forEach(function (raw) {
+    let line = raw.trim();
+    if (!line) return;
+    line = line.replace(/(\d{1,2})\s*시\s*(\d{1,2})\s*분/g, function (_, h, mm) { return h + ":" + pad2(Number(mm)); });
+    const pm = /^오후\s*/.test(line), am = /^오전\s*/.test(line);
+    if (pm || am) {
+      line = line.replace(/^(오전|오후)\s*/, "");
+      if (pm) line = line.replace(/^(\d{1,2})/, function (h) { return Number(h) < 12 ? String(Number(h) + 12) : h; });
+    }
+    const range = line.match(/^(\d{1,2})(?::(\d{2})|시)\s*(?:-|~|부터)\s*(\d{1,2})(?::(\d{2})|시)\s*(?:까지)?\s*(.+)$/);
+    if (range) {
+      const a = clockOf(range[1], range[2]), b = clockOf(range[3], range[4]);
+      if (a && b) { out.push({ time: a + "-" + b, text: range[5].trim() }); return; }
+    }
+    const one = line.match(/^(\d{1,2})(?::(\d{2})|시)\s*(?:에)?\s*(.+)$/);
+    if (one) {
+      const a = clockOf(one[1], one[2]);
+      if (a) { out.push({ time: a + "-" + addHour(a), text: one[3].trim() }); return; }
+    }
+    out.push({ time: null, text: line });
+  });
+  return out.filter(function (e) { return e.text; });
+}
+// 템플릿 폴백에도 특별 일정을 실제 블록으로 넣는다(AI가 죽어도 일정이 사라지지 않게).
+function mergeEventBlocks(blocks, text) {
+  const evs = parseEvents(text);
+  if (!evs.length) return blocks;
+  const timed = evs.filter(function (e) { return e.time; });
+  const kept = blocks.filter(function (b) {
+    const s = blockStartMinutes(b.time), e = blockEndMinutes(b.time);
+    if (s == null || e == null) return true;
+    return !timed.some(function (ev) {
+      const es = blockStartMinutes(ev.time), ee = blockEndMinutes(ev.time);
+      return es != null && ee != null && s < ee && es < e;   // 겹치는 템플릿 블록은 일정에 자리를 내준다
+    });
+  });
+  evs.forEach(function (ev) {
+    kept.push({ id: genId("b"), time: ev.time || "시간 미정", text: ev.text, goalId: null, taskId: null, core: false, done: false, event: true });
+  });
+  return kept;
+}
+
 function templatePlan(candidates) {
   const c = candidates || [];
   function study(i, time) {
@@ -663,17 +729,20 @@ async function aiGeneratePlan(candidates, targetDate, opts) {
     "후보 과제를 시간표에 배치하고(각 블록 ref에 후보 index), 휴식/식사/운동/고정일정 같은 생활 블록은 ref 없이 넣어라. " +
     "가장 중요한 3개 학습 블록에만 core:true. " +
     "이 사람은 쉽게 지치고 눈이 건조하다: 딥워크 사이에 '물 마시기·눈 휴식(먼 곳 보기)' 같은 짧은 회복 블록을 최소 2개 넣어라. " +
+    "[특별 일정]이 있으면 그 시각을 그 일정 블록으로 채우고, 원래 그 시간에 넣으려던 학습은 다른 시간으로 옮겨라. 시각이 없는 일정은 그날 안의 적절한 시간에 넣어라. " +
     "meals에는 그날의 아침·점심·저녁을 제안한다. 규칙: [식단 조건]의 '지금 있는 재료'를 최대한 활용하고, 못 먹는 것은 반드시 제외하며, 조리 조건·목표(감량/증량/유지)·열량 추정치를 반영한다. 한 끼 20자 내외로 구체적으로. " +
     "shopping에는 지금 재료로 부족해서 사두면 좋은 것을 3~6개, 짧은 품목명으로 넣는다(이미 있다고 적힌 재료는 넣지 마라). 재료 정보가 없으면 shopping은 빈 배열. " +
     "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"ref\":0,\"core\":true}]," +
     "\"meals\":{\"아침\":\"...\",\"점심\":\"...\",\"저녁\":\"...\"},\"shopping\":[\"품목1\",\"품목2\"]}";
   const ctx = profileContext(loadProfile());
+  const evt = targetDate ? getEvent(targetDate) : "";
   const mctx = mealContext(loadProfile(), new Date());
   const list = candidates.map(function (c, i) { return i + ": " + c.text + " (" + c.goalTitle + ")"; }).join("\n");
   const energy = targetDate ? getEnergy(targetDate) : "";
   const notes = targetDate ? recentNotes(targetDate, 3) : [];
   const usr =
     (when ? ("[날짜] " + when + "\n\n") : "") +
+    (evt ? ("[특별 일정 - 반드시 반영, 이 시간엔 다른 걸 넣지 마라]\n" + evt + "\n\n") : "") +
     (opts.fromTime ? ("[지금 " + opts.fromTime + "] 하루가 이미 시작됐다. " + opts.fromTime + "부터 취침까지 남은 시간만으로 다시 짜라. 지나간 시간은 넣지 마라. 남은 시간이 짧으면 핵심을 줄여라.\n\n") : "") +
     (energy && ENERGY_RULE[energy] ? ("[오늘 배터리] " + ENERGY_RULE[energy] + "\n\n") : "") +
     (ctx ? ("[내 프로필]\n" + ctx + "\n\n") : "") +
@@ -781,7 +850,7 @@ async function generatePlan(targetDate, opts) {
       if (res) { blocks = res.blocks; meals = res.meals; shopping = res.shopping; source = "ai"; }
     }
     if (!blocks) {
-      blocks = templatePlan(candidates);
+      blocks = mergeEventBlocks(templatePlan(candidates), getEvent(targetDate));
       if (opts.fromTime) {
         // 템플릿 폴백에서도 지나간 블록은 버림
         const cutoff = blockStartMinutes(opts.fromTime);
@@ -956,6 +1025,21 @@ function renderHero() {
     eWrap.appendChild(b);
   });
   box.appendChild(eWrap);
+
+  // 그날 하루만의 예외 일정 — 계획 생성 입력
+  const evWrap = el("div", { cls: "evt" });
+  const evLab = el("label", { cls: "evtlabel", text: (isTomorrow ? "내일" : "오늘") + " 특별한 일정 (선택)" });
+  evLab.setAttribute("for", "evtField");
+  const evTa = el("textarea", { cls: "evtinput" });
+  evTa.id = "evtField";
+  evTa.rows = 2;
+  evTa.placeholder = "예: 14:00 병원, 19시-21시 알바, 과제 마감";
+  evTa.value = getEvent(target);
+  bindField(evTa, "evt:" + target, function (v) { setEvent(target, v); });
+  evWrap.appendChild(evLab);
+  evWrap.appendChild(evTa);
+  evWrap.appendChild(el("p", { cls: "evthint", text: "적어두고 아래 버튼을 누르면 그 시각을 비워두고 나머지를 짭니다." }));
+  box.appendChild(evWrap);
 
   box.appendChild(genButton(target, plan ? "계획 다시 생성" : (isTomorrow ? "내일 계획 생성" : "오늘 계획 생성")));
 
@@ -1231,7 +1315,7 @@ function renderToday() {
   const blocksWrap = el("div", { cls: "blocks" });
   plan.blocks.forEach(function (b) {
     const open = !b.done && isOnTime(b, target, nowTick);
-    const row = el("label", { cls: "block" + (b.core ? " isCore" : "") + (b.done ? " off" : "") + (open ? " open" : "") });
+    const row = el("label", { cls: "block" + (b.core ? " isCore" : "") + (b.event ? " isEvent" : "") + (b.done ? " off" : "") + (open ? " open" : "") });
     const cb = el("input");
     cb.type = "checkbox";
     cb.checked = !!b.done;
@@ -1240,12 +1324,20 @@ function renderToday() {
     row.appendChild(el("span", { cls: "time", text: b.time }));
     if (b.core) { const dotm = el("span", { cls: "coremark", text: "●" }); dotm.setAttribute("aria-hidden", "true"); row.appendChild(dotm); }
     row.appendChild(el("span", { cls: "txt", text: b.text }));
+    if (b.event) row.appendChild(el("span", { cls: "badge evtb", text: "일정" }));
     if (b.done && !b.onTime) row.appendChild(el("span", { cls: "badge late", text: "늦음" }));
     else if (b.done && b.onTime) row.appendChild(el("span", { cls: "badge ontime", text: "정시" }));
     else if (open) row.appendChild(el("span", { cls: "badge now", text: "지금" }));
     blocksWrap.appendChild(row);
   });
   box.appendChild(blocksWrap);
+  // 적어둔 특별 일정이 지금 계획에 안 들어가 있으면 사실만 알린다
+  const evMiss = parseEvents(getEvent(target)).filter(function (ev) {
+    return !plan.blocks.some(function (b) { return b.text.indexOf(ev.text) >= 0; });
+  });
+  if (evMiss.length) {
+    box.appendChild(el("p", { cls: "muted", text: "적어둔 특별 일정이 이 계획에 없습니다: " + evMiss.map(function (e) { return e.text; }).join(", ") + " · 다시 생성하면 반영됩니다." }));
+  }
   if (plan.source === "template") {
     if (hasAI()) {
       const errp = el("p", { cls: "err", text: "AI 실패 → 기본 템플릿. 이유: " + (lastAIError || "알 수 없음") });
@@ -1488,16 +1580,50 @@ function yearPillar(year) {
   return STEMS[i % 10] + BRANCHES[i % 12];
 }
 
-// 그 해가 도움이 되는 해인지(금·수) 버티는 해인지(화·토) 판정
-function yearTone(year) {
-  const gz = yearPillar(year);
+// 간지 한 쌍이 도움이 되는지(금·수) 버티는 구간인지(화·토) 판정 — 세운·월운 공용
+function gzTone(gz) {
   const els = [STEM_EL[gz[0]], BRANCH_EL[gz[1]]];
   const good = els.filter(function (e) { return e === "금" || e === "수"; }).length;
   const bad = els.filter(function (e) { return e === "화" || e === "토"; }).length;
-  if (good === 2) return { key: "good", label: "순풍", note: "희신·용신이 함께 드는 해" };
+  if (good === 2) return { key: "good", label: "순풍", note: "희신·용신이 함께 드는 구간" };
   if (good === 1) return { key: "mixed", label: "전환", note: "도움이 되는 기운이 절반 들어옴" };
   if (bad === 2) return { key: "hold", label: "축적", note: "기신 구간 — 벌이지 말고 쌓을 때" };
   return { key: "mixed", label: "보통", note: "" };
+}
+function yearTone(year) { return gzTone(yearPillar(year)); }
+
+// ---- 중간 흐름: 월운 (절기 기준 근사) ----
+// 절입일은 해마다 하루쯤 움직인다. 여기서는 평년 근사값을 쓴다(1월~12월).
+const TERM_DAY = [6, 4, 6, 5, 6, 6, 7, 8, 8, 8, 7, 7];
+// 달력 날짜 -> 절기월 {y, m}. m=2면 인월(寅), m=1이면 축월(丑, 지난해에 속함)
+function solarMonth(dateString) {
+  const p = String(dateString).split("-").map(Number);
+  let y = p[0], m = p[1];
+  if (p[2] < TERM_DAY[m - 1]) { m -= 1; if (m === 0) { m = 12; y -= 1; } }
+  return { y: y, m: m };
+}
+// 월주(月柱). 월지는 절기월로, 월간은 오호둔(연간에서 유도).
+function monthPillar(dateString) {
+  const sm = solarMonth(dateString);
+  const bi = sm.m % 12;                                  // 2월->寅(2), 12월->子(0), 1월->丑(1)
+  const stemYear = sm.m === 1 ? sm.y - 1 : sm.y;         // 한 해는 인월(입춘)부터
+  const ys = (((stemYear - 1984) % 60 + 60) % 60) % 10;  // 연간 index
+  const base = ((ys % 5) * 2 + 2) % 10;                  // 오호둔: 甲己->丙寅 ...
+  const si = (base + ((bi - 2 + 12) % 12)) % 10;
+  return STEMS[si] + BRANCHES[bi];
+}
+// 이번 달부터 count개월의 흐름
+function monthFlow(dateString, count) {
+  const start = solarMonth(dateString);
+  const out = [];
+  for (let i = 0; i < (count || 3); i++) {
+    let m = start.m + i, y = start.y;
+    while (m > 12) { m -= 12; y += 1; }
+    const probe = y + "-" + pad2(m) + "-" + pad2(TERM_DAY[m - 1] + 1);
+    const gz = monthPillar(probe);
+    out.push({ y: y, m: m, gz: gz, el: STEM_EL[gz[0]] + BRANCH_EL[gz[1]], tone: gzTone(gz) });
+  }
+  return out;
 }
 
 function yearFlow(fromYear, count) {
@@ -1615,6 +1741,20 @@ function renderFlow() {
   if (st) short.appendChild(el("div", { cls: "muted", text: "다음 차례: " + st.text + " · " + st.goalTitle }));
   box.appendChild(short);
 
+  // --- 중간 흐름: 이번 달부터 3개월 · 월운 ---
+  const mon = el("div", { cls: "layer" });
+  mon.appendChild(el("div", { cls: "llabel", text: "이번 달부터 3개월 · 월운" }));
+  monthFlow(today, 3).forEach(function (mo, i) {
+    const row = el("div", { cls: "yrow " + mo.tone.key + (i === 0 ? " now" : "") });
+    row.appendChild(el("span", { cls: "yy", text: mo.m + "월" }));
+    row.appendChild(el("span", { cls: "ygz", text: mo.gz }));
+    row.appendChild(el("span", { cls: "ytone", text: mo.tone.label }));
+    if (i === 0 || mo.tone.key === "good") row.appendChild(el("span", { cls: "ynote", text: mo.tone.note }));
+    mon.appendChild(row);
+  });
+  mon.appendChild(el("div", { cls: "muted", text: "월 경계는 절기(입춘·경칩 …) 기준이라 달력 1일과 다릅니다." }));
+  box.appendChild(mon);
+
   // --- 중간 흐름: 세운 6년 ---
   const mid = el("div", { cls: "layer" });
   mid.appendChild(el("div", { cls: "llabel", text: "앞으로 6년 · 세운" }));
@@ -1696,7 +1836,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

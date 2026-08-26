@@ -69,35 +69,14 @@ html, body {
   gap: 16px;
 }
 
-/* wide screens: use the empty side space — plan on the left, the rest on the right */
+/* wide screens: 탭마다 페이지가 짧아졌으므로 한 줄로 세우고 가운데만 넓힌다 */
 @media (min-width: 900px) {
-  #screen {
-    max-width: 1080px;
-    display: grid;
-    grid-template-columns: 1.15fr 1fr;
-    grid-template-areas:
-      "hero   hero"
-      "today  prog"
-      "today  meals"
-      "today  note"
-      "today  flow"
-      "today  settings"
-      "footer footer";
-    align-items: start;
-    gap: 16px 18px;
-  }
-  .hero { grid-area: hero; }
-  .today { grid-area: today; }
-  .prog { grid-area: prog; }
-  .meals { grid-area: meals; }
-  .note { grid-area: note; }
-  .flow { grid-area: flow; }
-  .settings { grid-area: settings; }
-  .footer { grid-area: footer; }
+  #screen { max-width: 760px; }
+  .tabbar { max-width: 760px; left: 50%; transform: translateX(-50%); border-radius: 14px 14px 0 0; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
 }
 
 /* cards */
-.hero, .prog, .today, .settings, .meals, .note, .flow, .footer {
+.prog, .today, .settings, .meals, .note, .flow, .footer, .tools, .natal, .fortune, .goals {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -115,7 +94,6 @@ h2 {
 .err { color: var(--danger); font-size: 13px; line-height: 1.5; word-break: break-all; margin: 10px 0 0; }
 
 /* hero / landing */
-.hero { padding: 24px 20px; }
 .brand { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
 .tag { font-size: 15px; font-weight: 600; color: var(--accent); margin: 4px 0 12px; }
 .lede { font-size: 14px; line-height: 1.65; color: var(--muted); margin: 0 0 18px; }
@@ -450,3 +428,68 @@ button:disabled { opacity: 0.5; cursor: default; }
   border: 1px solid var(--line); color: var(--dim);
 }
 .hchip.on { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+
+/* ===== 탭 구조 (v2.0) ===== */
+/* 하단 탭바가 내용을 가리지 않도록 */
+body { padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
+
+.topbar {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 4px 0 14px; margin: 0 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+.topbar .mark { margin: 0; }
+.topbar .brand { font-size: 17px; margin: 0; }
+.tdate { margin-left: auto; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+.tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+  display: flex; gap: 0;
+  padding: 6px 0 calc(6px + env(safe-area-inset-bottom, 0px));
+  background: var(--card); border-top: 1px solid var(--line);
+}
+.tab {
+  flex: 1 1 0; display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 6px 2px; min-height: 48px;
+  background: none; border: none; cursor: pointer; font: inherit; color: var(--muted);
+}
+.ticon { font-size: 17px; line-height: 1; }
+.tlabel { font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
+.tab.on { color: var(--accent); }
+.tab.on .tlabel { font-weight: 800; }
+
+/* 설정이 접힘에서 펼침으로 바뀌면서 details 여백이 사라짐 */
+section.settings, section.goals {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 20px; margin: 0 0 16px;
+}
+.guidebox { margin: 0 0 16px; }
+.tools {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 20px; margin: 0 0 16px;
+}
+
+/* ===== 원국 ===== */
+.natal {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 20px; margin: 0 0 16px;
+}
+.ngrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
+.ncol {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 12px 4px; border-radius: 9px; background: var(--neutral-soft);
+}
+.ncol.isday { background: var(--accent-soft); }
+.nlab { font-size: 10px; font-weight: 800; letter-spacing: 0.1em; color: var(--muted); }
+.nstem, .nbranch { font-size: 21px; font-weight: 700; color: var(--ink); line-height: 1.15; }
+.ncol.isday .nstem { color: var(--accent); }
+.nel { font-size: 11px; color: var(--dim); margin-top: 2px; }
+.nels { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.elchip {
+  font-size: 12px; font-weight: 700; padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.elchip.use { border-color: var(--accent); color: var(--accent); }
+.elchip.zero { opacity: 0.55; }
+
+.tstreak { font-size: 12px; font-weight: 700; color: var(--accent); }

@@ -1138,16 +1138,69 @@ function markOpen(det, key) {
 }
 
 // 재렌더가 사용자의 작업을 삼키지 않도록 포커스·커서·열린 패널을 보존한다.
+// ---- 탭: 계획표가 메인이고, 나머지는 각자 페이지를 갖는다 ----
+const TABS = [
+  { key: "today", label: "오늘", icon: "📋" },
+  { key: "goal", label: "목표", icon: "🎯" },
+  { key: "flow", label: "흐름", icon: "🀄" },
+  { key: "me", label: "설정", icon: "⚙" }
+];
+let tabKey = "today";
+function currentTab() {
+  try {
+    if (typeof location !== "undefined" && location.hash) {
+      const h = location.hash.replace(/^#\/?/, "");
+      if (TABS.some(function (t) { return t.key === h; })) return h;
+    }
+  } catch (e) {}
+  return tabKey;
+}
+function goTab(k) {
+  tabKey = k;
+  closeFocusQuiet();
+  try { if (typeof location !== "undefined") location.hash = "#/" + k; } catch (e) {}
+  render();
+  try { if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, 0); } catch (e) {}
+}
+function renderTopbar() {
+  const bar = el("header", { cls: "topbar" });
+  const mark = el("div", { cls: "mark" });
+  const ring = svgRing();
+  if (ring) mark.appendChild(ring);
+  mark.appendChild(el("h1", { cls: "brand", text: "LOOP" }));
+  bar.appendChild(mark);
+  const now = new Date();
+  const target = activeDate(now);
+  const streak = computeStreak(loadVisits(), todayStr(now));
+  if (streak > 0) bar.appendChild(el("span", { cls: "tstreak", text: "🔥 " + streak + "일" }));
+  bar.appendChild(el("span", { cls: "tdate", text: (target !== todayStr(now) ? "내일 · " : "") + dateWithWeekday(target) }));
+  return bar;
+}
+function renderTabbar() {
+  const nav = el("nav", { cls: "tabbar" });
+  nav.setAttribute("aria-label", "화면 이동");
+  const cur = currentTab();
+  TABS.forEach(function (t) {
+    const b = el("button", { cls: "tab" + (t.key === cur ? " on" : "") });
+    b.appendChild(el("span", { cls: "ticon", text: t.icon }));
+    b.appendChild(el("span", { cls: "tlabel", text: t.label }));
+    b.setAttribute("aria-current", t.key === cur ? "page" : "false");
+    b.addEventListener("click", function () { goTab(t.key); });
+    nav.appendChild(b);
+  });
+  return nav;
+}
+
 // ---- 실행 모드: 지금 블록 하나만 남기고 전부 치운다 ----
 let focusId = null;      // 열어둔 블록 id
 let focusUntil = 0;      // 5분 타이머 종료 시각(ms). 0이면 안 돎
 let focusTick = null;
 function openFocus(id) { focusId = id; focusUntil = 0; render(); }
-function closeFocus() {
+function closeFocusQuiet() {
   focusId = null; focusUntil = 0;
   if (focusTick && typeof clearInterval !== "undefined") { clearInterval(focusTick); focusTick = null; }
-  render();
 }
+function closeFocus() { closeFocusQuiet(); render(); }
 function startFive() {
   focusUntil = Date.now() + 5 * 60 * 1000;
   if (typeof setInterval !== "undefined" && !focusTick) {
@@ -1185,16 +1238,30 @@ function render() {
   if (foc) {
     root.appendChild(foc);
   } else {
-    root.appendChild(renderHero());
-    root.appendChild(renderToday());
-    root.appendChild(renderFortune());
-    root.appendChild(renderProgress());
-    const meals = renderMeals();
-    if (meals) root.appendChild(meals);
-    root.appendChild(renderNote());
-    root.appendChild(renderFlow());
-    root.appendChild(renderSettings());
-    root.appendChild(renderFooter());
+    root.appendChild(renderTopbar());
+    const tab = currentTab();
+    if (tab === "goal") {
+      root.appendChild(renderProgress());
+      root.appendChild(renderGoalsPanel());
+    } else if (tab === "flow") {
+      root.appendChild(renderFortune());
+      root.appendChild(renderFlow());
+      root.appendChild(renderNatal());
+    } else if (tab === "me") {
+      root.appendChild(renderSettings());
+      root.appendChild(renderFooter());
+      root.appendChild(renderGuide());
+    } else {
+      const nb = renderNowbar();
+      if (nb) root.appendChild(nb);
+      root.appendChild(renderToday());
+      const meals = renderMeals();
+      if (meals) root.appendChild(meals);
+      root.appendChild(renderPlanTools());
+      root.appendChild(renderNote());
+      root.appendChild(renderQuote());
+    }
+    root.appendChild(renderTabbar());
   }
 
   // 2) 같은 필드를 다시 찾아 포커스와 커서 위치를 되돌림
@@ -1306,83 +1373,47 @@ function renderFocus() {
 }
 
 // landing/hero: what this app does + energy picker + the main action
-function renderHero() {
-  const box = el("section", { cls: "hero" });
+// 지금 뭐 할 차례. 줄 전체가 실행 모드 진입 버튼이다.
+function renderNowbar() {
+  const now = new Date();
+  if (activeDate(now) !== todayStr(now)) return null;
+  const plan = loadPlans()[todayStr(now)];
+  if (!plan) return null;
+  const cb = currentBlock(plan.blocks.filter(function (x) { return !x.done; }), now);
+  if (!cb) return null;
+  const bar = el("button", { cls: "nowbar" + (cb.state === "now" ? " active" : "") });
+  bar.appendChild(el("span", { cls: "nlabel", text: cb.state === "now" ? "지금" : "다음" }));
+  bar.appendChild(el("span", { cls: "ntext", text: cb.block.text }));
+  bar.appendChild(el("span", { cls: "ntime", text: cb.block.time }));
+  bar.appendChild(el("span", { cls: "ngo", text: "▶ 실행" }));
+  bar.addEventListener("click", function () { openFocus(cb.block.id); });
+  return bar;
+}
+
+// 계획을 만드는 도구 — 배터리 · 특별 일정 · 생성 버튼. 계획 아래에 둔다(계획이 먼저 보여야 한다).
+function renderPlanTools() {
   const now = new Date();
   const target = activeDate(now);
   const isTomorrow = target !== todayStr(now);
   const plan = loadPlans()[target];
+  const box = el("section", { cls: "tools" });
+  box.id = "tools";
+  box.appendChild(el("h2", { text: plan ? "다시 짜기" : (isTomorrow ? "내일 계획 만들기" : "오늘 계획 만들기") }));
+  box.appendChild(el("p", { cls: "what", text: "배터리와 특별 일정을 반영해 AI가 시간표를 짭니다. 블록마다 장소와 첫 동작까지 붙습니다." }));
 
-  const mark = el("div", { cls: "mark" });
-  const ring = svgRing();
-  if (ring) mark.appendChild(ring);
-  mark.appendChild(el("h1", { cls: "brand", text: "LOOP" }));
-  box.appendChild(mark);
-  box.appendChild(el("p", { cls: "tag", text: "고민하지 말고, 정해진 대로." }));
-
-  // 지금 뭐 할 차례 — 오늘 계획이 있을 때만
-  const todayPlan = loadPlans()[todayStr(now)];
-  if (todayPlan && !isTomorrow) {
-    const cb = currentBlock(todayPlan.blocks.filter(function (b) { return !b.done; }), now);
-    if (cb) {
-      const nowbar = el("button", { cls: "nowbar" + (cb.state === "now" ? " active" : "") });
-      nowbar.appendChild(el("span", { cls: "nlabel", text: cb.state === "now" ? "지금" : "다음" }));
-      nowbar.appendChild(el("span", { cls: "ntext", text: cb.block.text }));
-      nowbar.appendChild(el("span", { cls: "ntime", text: cb.block.time }));
-      nowbar.appendChild(el("span", { cls: "ngo", text: "▶ 실행" }));
-      nowbar.addEventListener("click", function () { openFocus(cb.block.id); });
-      box.appendChild(nowbar);
-    }
-  }
-  box.appendChild(el("p", {
-    cls: "lede",
-    text: "내 상황(수업·알바·리듬·목표)을 저장해두면 버튼 한 번에 AI가 " +
-      (isTomorrow ? "내일" : "오늘") + " 하루를 시간대별로 짭니다. " +
-      "굵게 표시된 핵심 3개를 제시간에 시작하면 그날은 성공입니다."
-  }));
-
-  // 이 앱이 뭘 할 수 있는지 — 이름만 보고 바로 누를 수 있게
-  const guide = el("div", { cls: "guide" });
-  guide.appendChild(el("div", { cls: "glabel", text: "할 수 있는 것" }));
-  const todayHas = !!loadPlans()[todayStr(now)];
-  const mealsOn = mealsAvailable();
-  [
-    { icon: "▶", name: "실행 모드", what: "지금 할 것 하나만 크게. 첫 동작과 남은 시간이 같이 나옵니다",
-      off: !todayHas, offwhy: "오늘 계획을 먼저 만드세요", go: function () { focusNow(); } },
-    { icon: "🧩", name: "목표 쪼개기", what: "큰 목표를 AI가 60분짜리 과제로 나눠줍니다",
-      go: function () { openPanels.settings = true; render(); scrollTo("settings"); } },
-    { icon: "🍚", name: "식단 · 장보기", what: mealsOn ? "냉장고 재료로 오늘 세 끼와 장볼 것을 뽑습니다" : "설정에 냉장고 재료를 적으면 세 끼와 장보기 목록이 나옵니다",
-      go: function () { if (mealsOn) scrollTo("meals"); else { openPanels.settings = true; render(); scrollTo("settings"); } } },
-    { icon: "🀄", name: "오늘의 운세", what: "사주로 본 오늘의 결과 힘 실리는 시간대",
-      go: function () { scrollTo("fortune"); } },
-    { icon: "⬇", name: "백업", what: "계획·기록을 파일로 빼둡니다. 브라우저는 데이터를 지울 수 있습니다",
-      go: function () { downloadBackup(); } }
-  ].forEach(function (it) {
-    const b = el("button", { cls: "grow" + (it.off ? " goff" : "") });
-    b.appendChild(el("span", { cls: "gicon", text: it.icon }));
-    b.appendChild(el("span", { cls: "gname", text: it.name }));
-    b.appendChild(el("span", { cls: "gwhat", text: it.off ? it.offwhy : it.what }));
-    b.disabled = !!it.off;
-    b.addEventListener("click", function () { if (!it.off) it.go(); });
-    guide.appendChild(b);
-  });
-  box.appendChild(guide);
-
-  // energy picker — battery-aware planning
   const eWrap = el("div", { cls: "energy" });
   eWrap.appendChild(el("span", { cls: "elabel", text: "오늘 배터리" }));
   const cur = getEnergy(target);
   ENERGY_LEVELS.forEach(function (lv) {
-    const b = el("button", { cls: "echip" + (cur === lv.key ? " on" : ""), text: lv.label });
-    b.title = lv.hint;
-    b.setAttribute("aria-label", "오늘 배터리 " + lv.label + " — " + lv.hint);
-    b.setAttribute("aria-pressed", cur === lv.key ? "true" : "false");
-    b.addEventListener("click", function () { setEnergy(target, lv.key); render(); });
-    eWrap.appendChild(b);
+    const c = el("button", { cls: "echip" + (cur === lv.key ? " on" : ""), text: lv.label });
+    c.title = lv.hint;
+    c.setAttribute("aria-label", "오늘 배터리 " + lv.label + " — " + lv.hint);
+    c.setAttribute("aria-pressed", cur === lv.key ? "true" : "false");
+    c.addEventListener("click", function () { setEnergy(target, lv.key); render(); });
+    eWrap.appendChild(c);
   });
   box.appendChild(eWrap);
 
-  // 그날 하루만의 예외 일정 — 계획 생성 입력
   const evWrap = el("div", { cls: "evt" });
   const evLab = el("label", { cls: "evtlabel", text: (isTomorrow ? "내일" : "오늘") + " 특별한 일정 (선택)" });
   evLab.setAttribute("for", "evtField");
@@ -1398,14 +1429,47 @@ function renderHero() {
   box.appendChild(evWrap);
 
   box.appendChild(genButton(target, plan ? "계획 다시 생성" : (isTomorrow ? "내일 계획 생성" : "오늘 계획 생성")));
+  return box;
+}
 
-  // 오늘의 한 마디
-  const q = quoteFor(todayStr(now));
+// 이 앱이 뭘 할 수 있는지 — 이름만 보고 바로 누를 수 있게
+function renderGuide() {
+  const now = new Date();
+  const box = el("section", { cls: "guidebox" });
+  const guide = el("div", { cls: "guide" });
+  guide.appendChild(el("div", { cls: "glabel", text: "할 수 있는 것" }));
+  const todayHas = !!loadPlans()[todayStr(now)];
+  const mealsOn = mealsAvailable();
+  [
+    { icon: "▶", name: "실행 모드", what: "지금 할 것 하나만 크게. 첫 동작과 남은 시간이 같이 나옵니다",
+      off: !todayHas, offwhy: "오늘 탭에서 계획을 먼저 만드세요", go: function () { goTab("today"); focusNow(); } },
+    { icon: "🧩", name: "목표 쪼개기", what: "큰 목표를 AI가 60분짜리 과제로 나눠줍니다",
+      go: function () { goTab("goal"); } },
+    { icon: "🍚", name: "식단 · 장보기", what: mealsOn ? "냉장고 재료로 오늘 세 끼와 장볼 것을 뽑습니다" : "아래 “식단 · 몸”에 재료를 적으면 세 끼와 장보기 목록이 나옵니다",
+      go: function () { if (mealsOn) { goTab("today"); scrollTo("meals"); } else scrollTo("food"); } },
+    { icon: "🀄", name: "사주 · 운세", what: "오늘의 결, 이번 달·올해 구간, 내 원국 네 기둥",
+      go: function () { goTab("flow"); } },
+    { icon: "⬇", name: "백업", what: "계획·기록을 파일로 빼둡니다. 브라우저는 데이터를 지울 수 있습니다",
+      go: function () { downloadBackup(); } }
+  ].forEach(function (it) {
+    const btn = el("button", { cls: "grow" + (it.off ? " goff" : "") });
+    btn.appendChild(el("span", { cls: "gicon", text: it.icon }));
+    btn.appendChild(el("span", { cls: "gname", text: it.name }));
+    btn.appendChild(el("span", { cls: "gwhat", text: it.off ? it.offwhy : it.what }));
+    btn.disabled = !!it.off;
+    btn.addEventListener("click", function () { if (!it.off) it.go(); });
+    guide.appendChild(btn);
+  });
+  box.appendChild(guide);
+  return box;
+}
+
+function renderQuote() {
+  const q = quoteFor(todayStr(new Date()));
   const qbox = el("blockquote", { cls: "quote" });
   qbox.appendChild(el("span", { cls: "qtext", text: q.t }));
   if (q.a) qbox.appendChild(el("span", { cls: "qauth", text: "— " + q.a }));
-  box.appendChild(qbox);
-  return box;
+  return qbox;
 }
 
 // ---- 정시 알림 (브라우저 탭이 살아있는 동안 동작) ----
@@ -1752,76 +1816,13 @@ function renderToday() {
   return box;
 }
 
-function renderSettings() {
-  const box = markOpen(el("details", { cls: "settings" }), "settings");
-  box.id = "settings";
-  const sum = el("summary", { text: "⚙ 설정 — 내 정보 · 목표 · 식단 재료 · AI 키 · 백업" });
-  box.appendChild(sum);
-
+// 목표 · 과제 — 자기 페이지를 갖는다
+function renderGoalsPanel() {
   const profile = loadProfile();
-
-  // "내 정보" — categorized profile fields (all optional), fed to the AI planner
-  const info = el("div", { cls: "infowrap" });
-  info.appendChild(el("div", { cls: "infohd", text: "내 정보 (채울수록 계획이 정확해져요)" }));
-  PROFILE_FIELDS.forEach(function (fld) {
-    const wrap = el("div", { cls: "field" });
-    const lab = el("label", { cls: "flabel", text: fld.label });
-    lab.htmlFor = "f-" + fld.key;
-    wrap.appendChild(lab);
-    const ta = el("textarea", { cls: "finput" });
-    ta.id = "f-" + fld.key;
-    ta.placeholder = fld.ph;
-    ta.value = profile[fld.key] || "";
-    bindField(ta, "f-" + fld.key, function (v) {
-      const p = loadProfile(); p[fld.key] = v; saveProfile(p);
-    });
-    wrap.appendChild(ta);
-    info.appendChild(wrap);
-  });
-  box.appendChild(info);
-
-  // ---- 식단·몸 ----
-  const food = el("div", { cls: "infowrap" });
-  food.appendChild(el("div", { cls: "infohd", text: "식단 · 몸 (채우면 식단이 내 재료와 몸에 맞춰집니다)" }));
-
-  const brow = el("div", { cls: "addrow bodyrow" });
-  BODY_FIELDS.forEach(function (fld) {
-    const w = el("div", { cls: "bodyfield" });
-    const lab = el("label", { cls: "flabel", text: fld.label });
-    lab.htmlFor = "f-" + fld.key;
-    w.appendChild(lab);
-    const inp = el("input", { cls: "dl bodyinput" });
-    inp.type = "number"; inp.id = "f-" + fld.key; inp.placeholder = fld.ph;
-    inp.value = profile[fld.key] || "";
-    bindField(inp, "f-" + fld.key, function (v) {
-      const p = loadProfile(); p[fld.key] = v; saveProfile(p);
-      render(); // BMI·열량 추정치를 바로 갱신 (포커스·커서는 render가 보존)
-    });
-    w.appendChild(inp);
-    brow.appendChild(w);
-  });
-  food.appendChild(brow);
-  const bs = bodyStats(profile, new Date());
-  if (bs) food.appendChild(el("div", { cls: "muted", text: "BMI " + bs.bmi + " · 하루 필요 열량 추정 " + bs.tdee + "kcal (참고치)" }));
-
-  MEAL_FIELDS.forEach(function (fld) {
-    const wrap = el("div", { cls: "field" });
-    const lab = el("label", { cls: "flabel", text: fld.label });
-    lab.htmlFor = "f-" + fld.key;
-    wrap.appendChild(lab);
-    const node = fld.area ? el("textarea", { cls: "finput" }) : el("input", { cls: "finput oneline" });
-    if (!fld.area) node.type = "text";
-    node.id = "f-" + fld.key;
-    node.placeholder = fld.ph;
-    node.value = profile[fld.key] || "";
-    bindField(node, "f-" + fld.key, function (v) {
-      const p = loadProfile(); p[fld.key] = v; saveProfile(p);
-    });
-    wrap.appendChild(node);
-    food.appendChild(wrap);
-  });
-  box.appendChild(food);
-
+  const box = el("section", { cls: "goals" });
+  box.id = "goals";
+  box.appendChild(el("h2", { text: "목표 · 과제" }));
+  box.appendChild(el("p", { cls: "what", text: "목표를 적고 “AI로 과제 쪼개기”를 누르면 60분 안에 끝나는 과제로 나눠집니다. 그 과제가 계획의 학습 블록이 됩니다." }));
   profile.goals.forEach(function (g) {
     const gv = el("div", { cls: "goal" });
     const top = el("div", { cls: "goaltop" });
@@ -1906,6 +1907,81 @@ function renderSettings() {
   gi.addEventListener("keydown", function (e) { if (e.key === "Enter") addGoal(); });
   gadd.appendChild(gi); gadd.appendChild(gb);
   box.appendChild(gadd);
+  return box;
+}
+
+function renderSettings() {
+  const box = el("section", { cls: "settings" });
+  box.id = "settings";
+  box.appendChild(el("h2", { text: "설정" }));
+  box.appendChild(el("p", { cls: "what", text: "채울수록 계획이 정확해집니다. 전부 선택이고, 이 기기 안에만 저장됩니다." }));
+
+  const profile = loadProfile();
+
+  // "내 정보" — categorized profile fields (all optional), fed to the AI planner
+  const info = el("div", { cls: "infowrap" });
+  info.appendChild(el("div", { cls: "infohd", text: "내 정보 (채울수록 계획이 정확해져요)" }));
+  PROFILE_FIELDS.forEach(function (fld) {
+    const wrap = el("div", { cls: "field" });
+    const lab = el("label", { cls: "flabel", text: fld.label });
+    lab.htmlFor = "f-" + fld.key;
+    wrap.appendChild(lab);
+    const ta = el("textarea", { cls: "finput" });
+    ta.id = "f-" + fld.key;
+    ta.placeholder = fld.ph;
+    ta.value = profile[fld.key] || "";
+    bindField(ta, "f-" + fld.key, function (v) {
+      const p = loadProfile(); p[fld.key] = v; saveProfile(p);
+    });
+    wrap.appendChild(ta);
+    info.appendChild(wrap);
+  });
+  box.appendChild(info);
+
+  // ---- 식단·몸 ----
+  const food = el("div", { cls: "infowrap" });
+  food.id = "food";
+  food.appendChild(el("div", { cls: "infohd", text: "식단 · 몸 (채우면 식단이 내 재료와 몸에 맞춰집니다)" }));
+
+  const brow = el("div", { cls: "addrow bodyrow" });
+  BODY_FIELDS.forEach(function (fld) {
+    const w = el("div", { cls: "bodyfield" });
+    const lab = el("label", { cls: "flabel", text: fld.label });
+    lab.htmlFor = "f-" + fld.key;
+    w.appendChild(lab);
+    const inp = el("input", { cls: "dl bodyinput" });
+    inp.type = "number"; inp.id = "f-" + fld.key; inp.placeholder = fld.ph;
+    inp.value = profile[fld.key] || "";
+    bindField(inp, "f-" + fld.key, function (v) {
+      const p = loadProfile(); p[fld.key] = v; saveProfile(p);
+      render(); // BMI·열량 추정치를 바로 갱신 (포커스·커서는 render가 보존)
+    });
+    w.appendChild(inp);
+    brow.appendChild(w);
+  });
+  food.appendChild(brow);
+  const bs = bodyStats(profile, new Date());
+  if (bs) food.appendChild(el("div", { cls: "muted", text: "BMI " + bs.bmi + " · 하루 필요 열량 추정 " + bs.tdee + "kcal (참고치)" }));
+
+  MEAL_FIELDS.forEach(function (fld) {
+    const wrap = el("div", { cls: "field" });
+    const lab = el("label", { cls: "flabel", text: fld.label });
+    lab.htmlFor = "f-" + fld.key;
+    wrap.appendChild(lab);
+    const node = fld.area ? el("textarea", { cls: "finput" }) : el("input", { cls: "finput oneline" });
+    if (!fld.area) node.type = "text";
+    node.id = "f-" + fld.key;
+    node.placeholder = fld.ph;
+    node.value = profile[fld.key] || "";
+    bindField(node, "f-" + fld.key, function (v) {
+      const p = loadProfile(); p[fld.key] = v; saveProfile(p);
+    });
+    wrap.appendChild(node);
+    food.appendChild(wrap);
+  });
+  box.appendChild(food);
+
+
 
   // ---- AI 연결 (provider 설정) ----
   box.appendChild(el("div", { cls: "aihd", text: "AI 연결" }));
@@ -1976,6 +2052,38 @@ function renderSettings() {
   box.appendChild(drow);
   if (dataMsg) box.appendChild(el("div", { cls: "muted", text: dataMsg }));
   box.appendChild(el("div", { cls: "muted", text: "API 키는 백업에 들어가지 않습니다." }));
+  return box;
+}
+
+// 원국 카드 — 계산 결과를 그대로 보여준다. 해석은 한 줄뿐.
+const NATAL_COLS = [{ k: "year", l: "년" }, { k: "month", l: "월" }, { k: "day", l: "일" }, { k: "hour", l: "시" }];
+function renderNatal() {
+  const n = natalChart();
+  const box = el("section", { cls: "natal" });
+  box.id = "natal";
+  box.appendChild(el("h2", { text: "내 사주 원국" }));
+  box.appendChild(el("p", { cls: "what", text: BIRTH_DATE + " " + BIRTH_HOUR + "시 출생으로 계산한 네 기둥. 이 앱의 색과 판정이 전부 여기서 나옵니다." }));
+  const grid = el("div", { cls: "ngrid" });
+  NATAL_COLS.forEach(function (c) {
+    const gz = n[c.k];
+    const col = el("div", { cls: "ncol" + (c.k === "day" ? " isday" : "") });
+    col.appendChild(el("span", { cls: "nlab", text: c.l }));
+    col.appendChild(el("span", { cls: "nstem", text: gz[0] }));
+    col.appendChild(el("span", { cls: "nbranch", text: gz[1] }));
+    col.appendChild(el("span", { cls: "nel", text: STEM_EL[gz[0]] + BRANCH_EL[gz[1]] }));
+    grid.appendChild(col);
+  });
+  box.appendChild(grid);
+
+  const bar = el("div", { cls: "nels" });
+  ["목", "화", "토", "금", "수"].forEach(function (e) {
+    const c = n.count[e];
+    const chip = el("span", { cls: "elchip" + (e === "수" || e === "금" ? " use" : "") + (c === 0 ? " zero" : ""), text: e + " " + c });
+    bar.appendChild(chip);
+  });
+  box.appendChild(bar);
+  box.appendChild(el("p", { cls: "fact", text: "일간 " + n.dayMaster + "(" + STEM_EL[n.dayMaster] + ") · 화토 " + (n.count["화"] + n.count["토"]) + ", 금 " + n.count["금"] + ", 수 " + n.count["수"] + " — 그래서 용신이 水, 희신이 金입니다." }));
+  box.appendChild(el("p", { cls: "muted", text: "월주는 절기 근사값이라 절입일 전후 하루는 다를 수 있습니다." }));
   return box;
 }
 
@@ -2099,6 +2207,28 @@ const DAY_ACT = {
   "축적": "쌓는 날입니다. 새로 벌이지 말고 하던 것을 이어서 하세요.",
   "보통": "특별히 실리는 기운은 없습니다. 짜둔 계획대로 가면 됩니다."
 };
+// 시주: 일간에서 오자둔으로 시간을 뽑는다 (甲己일 -> 甲子시, 乙庚 -> 丙子 ...)
+function hourPillar(dateString, hour) {
+  const dp = dayPillar(dateString);
+  const base = ((STEMS.indexOf(dp[0]) % 5) * 2) % 10;
+  const bi = HOUR_BRANCHES.indexOf(hourBranch(hour));
+  return STEMS[(base + bi) % 10] + HOUR_BRANCHES[bi];
+}
+// 원국 네 기둥과 오행 개수. 용신 水·희신 金이 왜 그렇게 정해졌는지가 여기서 그대로 보인다.
+const BIRTH_DATE = "2002-07-05";
+function natalChart() {
+  const y = yearPillar(BIRTH_YEAR);
+  const mo = monthPillar(BIRTH_DATE);
+  const d = dayPillar(BIRTH_DATE);
+  const h = hourPillar(BIRTH_DATE, BIRTH_HOUR);
+  const count = { 목: 0, 화: 0, 토: 0, 금: 0, 수: 0 };
+  [y, mo, d, h].forEach(function (gz) {
+    count[STEM_EL[gz[0]]] += 1;
+    count[BRANCH_EL[gz[1]]] += 1;
+  });
+  return { year: y, month: mo, day: d, hour: h, dayMaster: d[0], count: count };
+}
+
 function dayFortune(dateString) {
   const gz = dayPillar(dateString);
   const tone = gzTone(gz);
@@ -2315,6 +2445,11 @@ function boot() {
   saveVisits(recordVisit(loadVisits(), todayStr()));
   render();
   if (notifyOn()) startNotifyLoop();
+  try {
+    if (typeof window !== "undefined" && window.addEventListener) {
+      window.addEventListener("hashchange", function () { closeFocusQuiet(); render(); });
+    }
+  } catch (e) {}
   // 현재/다음 블록 표시가 시간이 지나면 갱신되도록 1분마다 리렌더
   if (typeof setInterval !== "undefined") {
     setInterval(function () { if (!generating && !breaking) render(); }, 60000);
@@ -2327,7 +2462,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, renderFortune, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

@@ -626,3 +626,8 @@ section.settings, section.goals {
   color: var(--ink); font: inherit; font-size: 13px;
 }
 .askinput:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 지난 나 — 쌓인 기록을 프롬프트로 내보내는 자리 */
+.pastread { padding-bottom: 14px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
+.pastread h2 { margin-bottom: 6px; }
+.pastread .addrow { margin-top: 10px; }

@@ -616,3 +616,13 @@ section.settings, section.goals {
   white-space: pre; overflow-x: auto;
 }
 .promptbox:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 한 줄만 묻는다 — 입력 부담이 곧 이탈이다 */
+.askline { display: flex; align-items: center; gap: 10px; margin: 14px 0 0; }
+.asklabel { flex: none; font-size: 12px; font-weight: 700; color: var(--muted); }
+.askinput {
+  flex: 1 1 auto; min-height: 38px; padding: 8px 11px;
+  background: var(--card); border: 1px solid var(--field-line); border-radius: 8px;
+  color: var(--ink); font: inherit; font-size: 13px;
+}
+.askinput:focus { outline: 2px solid var(--accent); outline-offset: 1px; }

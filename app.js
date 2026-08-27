@@ -28,6 +28,7 @@ const PROFILE_FIELDS = [
   { key: "rhythm", label: "하루 리듬", ph: "예: 8시 기상 1시 취침 / 오전 집중 잘됨 / 밥 먹고 나면 졸림" },
   { key: "traits", label: "나의 특성", ph: "예: 쉽게 지침 / 1시간 넘으면 딴짓 / 시작이 어려움" },
   { key: "prefs", label: "선호·비선호", ph: "예: 운동은 수영 / 아침 일찍은 싫음 / 카페에서 집중 잘됨" },
+  { key: "exams", label: "시험 일정 (과목별로 안 적으면 이걸 씁니다)", ph: "예: 중간고사 10/20 / 기말고사 12/15" },
   { key: "courses", label: "이번 학기 과목", ph: "예: 데이터베이스 / 확률과통계 / 수치해석 / 기계학습개론 / 대규모병렬컴퓨팅" },
   { key: "places", label: "자주 가는 장소 · 이동 시간", ph: "예: 경북대 중앙도서관 / 집 책상 / 카페는 3시간 이상 앉을 때만 / 수영장 · 집→학교 25분" }
 ];
@@ -75,6 +76,42 @@ function mealContext(profile, now) {
 }
 
 const OLD_DEFAULT_PLACES = "경북대 중앙도서관 / 집 책상 / 카페는 3시간 이상 앉을 때만 / 수영장";
+// 시험 날짜가 비어 있으면 마감으로 도는 기능(과목 우선순위·복습 비중·역산)이 전부 죽는다.
+// 한국 대학 2학기는 규칙적이다 — 중간은 8주차, 기말은 15~16주차. 추정값을 넣어두고 고치게 한다.
+const DEFAULT_EXAMS = "중간고사 10/20 / 기말고사 12/15";
+// "중간고사 10/20 / 기말 12/15" -> [{ name, date }] (순수)
+function parseExams(text) {
+  const out = [];
+  // 날짜 자체에 / 가 들어간다(10/20). 공백으로 둘러싸인 슬래시만 구분자로 본다.
+  String(text || "").split(/[,·\n]+|\s+\/\s+/).forEach(function (seg) {
+    const t = seg.trim();
+    if (!t) return;
+    const m = t.match(/(\d{4}[-.\/]\d{1,2}[-.\/]\d{1,2}|\d{1,2}\s*[-.\/월]\s*\d{1,2})/);
+    if (!m) return;
+    const name = t.slice(0, m.index).trim().replace(/[:：-]\s*$/, "").trim() || "시험";
+    out.push({ name: name.slice(0, 20), date: m[1] });
+  });
+  return out;
+}
+// 아직 안 지난 시험 중 가장 가까운 것 (순수)
+function nextExam(profile, today) {
+  const list = parseExams(profile && profile.exams);
+  let best = null;
+  list.forEach(function (e) {
+    const d = daysUntil(e.date, today);
+    if (d == null || d < 0) return;
+    if (!best || d < best.daysLeft) best = { name: e.name, date: e.date, daysLeft: d };
+  });
+  return best;
+}
+// 이 목표의 실제 마감. 직접 적었으면 그것, 아니면 학기 시험 일정에서 물려받는다. (순수)
+function effectiveDeadline(goal, profile, today) {
+  const own = String((goal && goal.deadline) || "").trim();
+  if (own) return { date: own, name: "", inherited: false };
+  const ex = nextExam(profile, today);
+  return ex ? { date: ex.date, name: ex.name, inherited: true } : null;
+}
+
 const DEFAULT_COURSES = "데이터베이스 / 확률과통계 / 수치해석 / 기계학습개론 / 대규모병렬컴퓨팅";
 // 자유 텍스트에서 과목 이름만 뽑는다 (순수)
 function parseCourses(text) {
@@ -92,6 +129,7 @@ function loadProfile() {
   if (p.situation && !p.traits) { p.traits = p.situation; delete p.situation; }
   // 빈 입력창을 만들지 않는다(원칙 1). 한 번도 손대지 않았을 때만 기본 장소를 채워둔다.
   if (p.courses === undefined) p.courses = DEFAULT_COURSES;
+  if (p.exams === undefined) p.exams = DEFAULT_EXAMS;
   if (p.places === undefined) p.places = DEFAULT_PLACES;
   // 한 번도 안 고친 옛 기본값만 새 기본값으로 올린다. 직접 적은 값은 안 건드린다.
   else if (p.places === OLD_DEFAULT_PLACES) p.places = DEFAULT_PLACES;
@@ -110,6 +148,8 @@ function profileContext(profile) {
   if (r) lines.push("하루 리듬(기상~취침 안에서, 집중 잘 되는 시간에 핵심 배치): " + r);
   if (t) lines.push("나의 특성(강도·휴식 조절에 반영): " + t);
   if (pr) lines.push("선호·비선호: " + pr);
+  const ex = (profile.exams || "").trim();
+  if (ex) lines.push("시험 일정: " + ex);
   const co = (profile.courses || "").trim();
   if (co) lines.push("이번 학기 과목: " + co);
   const pl = (profile.places || "").trim();
@@ -1041,9 +1081,10 @@ function lastTouched(goalId, today, days) {
   return null;
 }
 // 오늘 이 과목을 다뤄야 하는 정도. 큰 쪽이 먼저. (순수하지 않음 — 계획 기록을 읽는다)
-function courseScore(goal, today) {
+function courseScore(goal, today, profile) {
   let sc = 0;
-  const d = daysUntil(goal.deadline, today);
+  const dl = effectiveDeadline(goal, profile || loadProfile(), today);
+  const d = dl ? daysUntil(dl.date, today) : null;
   if (d != null) sc += Math.max(0, 60 - Math.max(0, d)) * 2;      // 마감이 가까울수록 크게
   if (HEAVY_COURSE.test(goal.title)) sc += 15;                    // 부담된다고 한 과목
   const last = lastTouched(goal.id, today, 14);
@@ -1058,7 +1099,7 @@ function dailyCourses(profile, today, max) {
     return (g.tasks || []).some(function (t) { return !t.done; });
   });
   return live
-    .map(function (g) { return { g: g, s: courseScore(g, today) }; })
+    .map(function (g) { return { g: g, s: courseScore(g, today, profile) }; })
     .sort(function (a, b) { return (b.s - a.s) || (a.g.id < b.g.id ? -1 : 1); })
     .slice(0, max || DAILY_COURSES)
     .map(function (x) { return x.g; });
@@ -1074,12 +1115,13 @@ function scopeUnits(scope) {
   return { n: null, unit: "" };
 }
 // 마감까지 이 속도로 끝나는가. 격려하지 않고 숫자만. (순수하지 않음 — 오늘 날짜만 받는다)
-function examPace(goal, today) {
-  const daysLeft = daysUntil(goal && goal.deadline, today);
+function examPace(goal, today, profile) {
+  const dl = effectiveDeadline(goal, profile || loadProfile(), today);
+  const daysLeft = dl ? daysUntil(dl.date, today) : null;
   if (daysLeft == null) return null;
   const su = scopeUnits(goal.scope);
   const pr = goalProgress(goal);
-  const out = { daysLeft: daysLeft, unit: su.unit, total: su.n, done: null, left: null, daysPer: null, need: null };
+  const out = { daysLeft: daysLeft, unit: su.unit, total: su.n, done: null, left: null, daysPer: null, need: null, from: dl.name, inherited: dl.inherited };
   if (su.n && pr.total) {
     out.done = Math.round(su.n * (pr.done / pr.total) * 10) / 10;
     out.left = Math.round((su.n - out.done) * 10) / 10;
@@ -1091,10 +1133,12 @@ function examPace(goal, today) {
   return out;
 }
 // 목표 카드에 한 줄. 사실만.
-function paceLine(goal, today) {
-  const p2 = examPace(goal, today);
+function paceLine(goal, today, profile) {
+  const p2 = examPace(goal, today, profile);
   if (!p2) return "";
-  const head = p2.daysLeft >= 0 ? ("D-" + p2.daysLeft) : ("마감 " + (-p2.daysLeft) + "일 지남");
+  // 물려받은 날짜는 어디서 왔는지 밝힌다. 사용자가 적은 것처럼 보이면 안 된다.
+  const src = p2.inherited ? (" (" + (p2.from || "학기 일정") + ")") : "";
+  const head = (p2.daysLeft >= 0 ? ("D-" + p2.daysLeft) : ("마감 " + (-p2.daysLeft) + "일 지남")) + src;
   if (!p2.total) return head;
   const body = p2.total + p2.unit + " 중 " + p2.done + p2.unit + " · 남은 " + p2.left + p2.unit;
   if (p2.left <= 0) return head + " · " + p2.total + p2.unit + " 다 함";
@@ -1149,9 +1193,15 @@ const REVIEW_QUOTA = { far: 2, near: 4, imminent: 5 };
 function reviewQuota(profile, date) {
   let min = null;
   ((profile && profile.goals) || []).forEach(function (g) {
-    const d = daysUntil(g.deadline, date);
+    const dl = effectiveDeadline(g, profile, date);
+    const d = dl ? daysUntil(dl.date, date) : null;
     if (d != null && d >= 0 && (min == null || d < min)) min = d;
   });
+  // 목표가 하나도 없어도 학기 시험은 다가온다
+  if (min == null) {
+    const ex = nextExam(profile, date);
+    if (ex) min = ex.daysLeft;
+  }
   if (min == null) return REVIEW_QUOTA.far;
   if (min <= 3) return REVIEW_QUOTA.imminent;
   if (min <= 7) return REVIEW_QUOTA.near;
@@ -3114,7 +3164,7 @@ function renderGoalsPanel() {
       if (gg) { gg.scope = v; saveProfile(p2); }
     });
     top.appendChild(sc);
-    const pace = paceLine(g, todayStr(new Date()));
+    const pace = paceLine(g, todayStr(new Date()), profile);
     if (pace) gv.appendChild(el("div", { cls: "paceline", text: pace }));
     const del = el("button", { cls: "mini", text: "삭제" });
     del.addEventListener("click", function () {
@@ -3745,7 +3795,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, parseQuestions, attachQuestions, isLeech, leechItems, reviewQuota, LEECH_AT, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, parseExams, nextExam, effectiveDeadline, DEFAULT_EXAMS, parseQuestions, attachQuestions, isLeech, leechItems, reviewQuota, LEECH_AT, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

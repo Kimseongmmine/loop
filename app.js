@@ -961,6 +961,86 @@ function daySummary(plan) {
   };
 }
 
+// ---- 하루 과목 수 · 시험 역산 ----
+// 5과목을 라운드로빈하면 하루에 다섯 번 문맥이 바뀐다. 세 과목까지만 다룬다.
+const DAILY_COURSES = 3;
+const HEAVY_COURSE = /기계학습|머신러닝|확률|통계|확통|데이터베이스|데베/;   // 사용자가 부담된다고 한 것
+
+// 그 과목을 마지막으로 계획에 넣은 날. 없으면 null. (최근 days일만 본다)
+function lastTouched(goalId, today, days) {
+  const plans = loadPlans();
+  for (let i = 1; i <= (days || 14); i++) {
+    const d = addDays(today, -i);
+    const pl = plans[d];
+    if (pl && (pl.blocks || []).some(function (b) { return b.goalId === goalId; })) return d;
+  }
+  return null;
+}
+// 오늘 이 과목을 다뤄야 하는 정도. 큰 쪽이 먼저. (순수하지 않음 — 계획 기록을 읽는다)
+function courseScore(goal, today) {
+  let sc = 0;
+  const d = daysUntil(goal.deadline, today);
+  if (d != null) sc += Math.max(0, 60 - Math.max(0, d)) * 2;      // 마감이 가까울수록 크게
+  if (HEAVY_COURSE.test(goal.title)) sc += 15;                    // 부담된다고 한 과목
+  const last = lastTouched(goal.id, today, 14);
+  const gap = last == null ? 14 : Math.round((new Date(today.split("-")[0], +today.split("-")[1] - 1, +today.split("-")[2])
+    - new Date(last.split("-")[0], +last.split("-")[1] - 1, +last.split("-")[2])) / 86400000);
+  sc += Math.min(14, gap) * 3;                                     // 며칠씩 비지 않게
+  return sc;
+}
+// 오늘 다룰 과목. 남은 과제가 있는 것 중에서만 고른다. (결정론적 — 같은 날 같은 상태면 같은 답)
+function dailyCourses(profile, today, max) {
+  const live = ((profile && profile.goals) || []).filter(function (g) {
+    return (g.tasks || []).some(function (t) { return !t.done; });
+  });
+  return live
+    .map(function (g) { return { g: g, s: courseScore(g, today) }; })
+    .sort(function (a, b) { return (b.s - a.s) || (a.g.id < b.g.id ? -1 : 1); })
+    .slice(0, max || DAILY_COURSES)
+    .map(function (x) { return x.g; });
+}
+
+// "1~6장" -> 6, "3장" -> 3, "1-4주차" -> 4. 못 읽으면 null (순수)
+function scopeUnits(scope) {
+  const t = String(scope || "");
+  let m = t.match(/(\d{1,3})\s*[~\-–ï½ž]\s*(\d{1,3})\s*(장|절|챕터|주차|강)/);
+  if (m) { const n = Number(m[2]) - Number(m[1]) + 1; return { n: n > 0 ? n : null, unit: m[3] }; }
+  m = t.match(/(\d{1,3})\s*(장|절|챕터|주차|강)/);
+  if (m) return { n: Number(m[1]), unit: m[2] };
+  return { n: null, unit: "" };
+}
+// 마감까지 이 속도로 끝나는가. 격려하지 않고 숫자만. (순수하지 않음 — 오늘 날짜만 받는다)
+function examPace(goal, today) {
+  const daysLeft = daysUntil(goal && goal.deadline, today);
+  if (daysLeft == null) return null;
+  const su = scopeUnits(goal.scope);
+  const pr = goalProgress(goal);
+  const out = { daysLeft: daysLeft, unit: su.unit, total: su.n, done: null, left: null, daysPer: null, need: null };
+  if (su.n && pr.total) {
+    out.done = Math.round(su.n * (pr.done / pr.total) * 10) / 10;
+    out.left = Math.round((su.n - out.done) * 10) / 10;
+    if (out.left > 0 && daysLeft > 0) {
+      out.daysPer = Math.round((daysLeft / out.left) * 10) / 10;   // 며칠에 한 단위
+      out.need = Math.round((out.left / daysLeft) * 100) / 100;    // 하루에 몇 단위
+    }
+  }
+  return out;
+}
+// 목표 카드에 한 줄. 사실만.
+function paceLine(goal, today) {
+  const p2 = examPace(goal, today);
+  if (!p2) return "";
+  const head = p2.daysLeft >= 0 ? ("D-" + p2.daysLeft) : ("마감 " + (-p2.daysLeft) + "일 지남");
+  if (!p2.total) return head;
+  const body = p2.total + p2.unit + " 중 " + p2.done + p2.unit + " · 남은 " + p2.left + p2.unit;
+  if (p2.left <= 0) return head + " · " + p2.total + p2.unit + " 다 함";
+  if (p2.daysLeft <= 0) return head + " · " + body;
+  const rate = p2.need >= 1
+    ? ("하루 " + p2.need + p2.unit)
+    : (p2.daysPer + "일에 1" + p2.unit);
+  return head + " · " + body + " → " + rate;
+}
+
 // ---- 복습 큐 (간격 반복) ----
 // 틀린 것만 다시 뜬다. 아는 걸 다시 읽는 시간이 사라지는 게 이 기능의 값어치다.
 const K_REVIEWS = "loop.reviews";
@@ -1648,7 +1728,9 @@ async function generatePlan(targetDate, opts) {
     // 오늘 차례가 된 복습을 먼저 놓고, 남은 자리를 새 과제로 채운다.
     const prof0 = loadProfile();
     const revs = dueReviewCandidates(targetDate, prof0, 2);
-    const candidates = revs.concat(nextPendingTasks(prof0, Math.max(3, 6 - revs.length)));
+    // 하루 세 과목까지만. 다섯 과목을 돌리면 하루에 다섯 번 문맥이 바뀐다.
+    const today3 = { goals: dailyCourses(prof0, targetDate, DAILY_COURSES) };
+    const candidates = revs.concat(nextPendingTasks(today3, Math.max(3, 6 - revs.length)));
     let blocks = null, meals = null, shopping = null, source = "template";
     if (aiOn) {
       const res = await aiGeneratePlan(candidates, targetDate, opts);
@@ -2819,6 +2901,8 @@ function renderGoalsPanel() {
       if (gg) { gg.scope = v; saveProfile(p2); }
     });
     top.appendChild(sc);
+    const pace = paceLine(g, todayStr(new Date()));
+    if (pace) gv.appendChild(el("div", { cls: "paceline", text: pace }));
     const del = el("button", { cls: "mini", text: "삭제" });
     del.addEventListener("click", function () {
       const p = loadProfile();
@@ -3447,7 +3531,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

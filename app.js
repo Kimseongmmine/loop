@@ -961,6 +961,57 @@ function daySummary(plan) {
   };
 }
 
+// ---- 세션 기록 ----
+// 기록이 목적이 아니다. "90분 계획을 실제로 55분 한다"를 알아내 계획을 현실로 끌어내리는 게 목적이다.
+// 사람이 자기 계획을 짜면 실제 수행량의 몇 배로 잡는다는 게 사전등록 RCT 결과다.
+const K_SESSIONS = "loop.sessions";
+const SESSION_KEEP = 200;
+function loadSessions() { const v = lsGet(K_SESSIONS, []); return Array.isArray(v) ? v : []; }
+function saveSessions(v) { lsSet(K_SESSIONS, v.slice(-SESSION_KEEP)); }
+function addSession(date, block, actualMin, breaks) {
+  const planned = (function () {
+    const st = blockStartMinutes(block.time), en = blockEndMinutes(block.time);
+    return (st != null && en != null) ? (en - st) : null;
+  })();
+  if (planned == null || actualMin == null) return null;
+  const rec = {
+    date: date, blockId: block.id, kind: block.kind || null,
+    plannedMin: planned, actualMin: Math.max(0, Math.round(actualMin)), breaks: breaks || 0
+  };
+  const all = loadSessions();
+  all.push(rec);
+  saveSessions(all);
+  return rec;
+}
+// 유형별 계획 대비 실제 비율. 기록이 없으면 null — 없는 걸 지어내지 않는다. (순수하지 않음)
+const SESSION_MIN_N = 3;   // 이만큼 쌓이기 전에는 말하지 않는다
+function sessionStats(days, today) {
+  const from = addDays(today || todayStr(new Date()), -(days || 21));
+  const rows = loadSessions().filter(function (r) { return r.date >= from && r.plannedMin > 0; });
+  if (!rows.length) return null;
+  const by = {};
+  rows.forEach(function (r) {
+    const k = r.kind || "기타";
+    by[k] = by[k] || { n: 0, planned: 0, actual: 0, breaks: 0 };
+    by[k].n++; by[k].planned += r.plannedMin; by[k].actual += r.actualMin; by[k].breaks += r.breaks || 0;
+  });
+  const out = {};
+  Object.keys(by).forEach(function (k) {
+    const b = by[k];
+    if (b.n < SESSION_MIN_N) return;
+    out[k] = { n: b.n, ratio: Math.round((b.actual / b.planned) * 100) / 100, breaks: Math.round((b.breaks / b.n) * 10) / 10 };
+  });
+  return Object.keys(out).length ? out : null;
+}
+// AI에게 줄 한 줄. 없으면 빈 문자열 — 프롬프트를 억지로 채우지 않는다. (순수)
+function sessionLine(stats) {
+  if (!stats) return "";
+  const parts = Object.keys(stats).map(function (k) {
+    return k + " 과제는 계획의 " + stats[k].ratio + "배";
+  });
+  return parts.length ? ("실제로 걸리는 시간: " + parts.join(", ") + " (이 비율에 맞춰 블록 길이를 잡아라)") : "";
+}
+
 // ---- 하루 과목 수 · 시험 역산 ----
 // 5과목을 라운드로빈하면 하루에 다섯 번 문맥이 바뀐다. 세 과목까지만 다룬다.
 const DAILY_COURSES = 3;
@@ -1515,6 +1566,12 @@ function applyEdit(date, mutate) {
 // 복습 블록이면 상자를 올리거나(비었으면) 1로 되돌린다(적혀 있으면).
 function finishBlock(date, block) {
   const note = (askDraft[block.id] || "").trim();
+  // 착수 시각이 있어야 실제 시간을 안다. 없으면 기록하지 않는다(지어내지 않는다).
+  if (block.startedAt) {
+    const ms = new Date().getTime() - new Date(block.startedAt).getTime();
+    if (ms > 0) addSession(date, block, ms / 60000, focusBreaks[block.id] || 0);
+  }
+  delete focusBreaks[block.id];
   if (block.reviewId) {
     settleReview(block.reviewId, note, date);
   } else if (note) {
@@ -1631,6 +1688,7 @@ async function aiGeneratePlan(candidates, targetDate, opts) {
   const mctx = mealContext(loadProfile(), new Date());
   const list = candidates.map(function (c, i) { return i + ": " + c.text + " (" + c.goalTitle + ")"; }).join("\n");
   const energy = targetDate ? getEnergy(targetDate) : "";
+  const sline = sessionLine(sessionStats(21, targetDate || todayStr(new Date())));
   const notes = targetDate ? recentNotes(targetDate, 3) : [];
   const usr =
     (when ? ("[날짜] " + when + "\n\n") : "") +
@@ -1638,6 +1696,7 @@ async function aiGeneratePlan(candidates, targetDate, opts) {
     (opts.fromTime ? ("[지금 " + opts.fromTime + "] 하루가 이미 시작됐다. " + opts.fromTime + "부터 취침까지 남은 시간만으로 다시 짜라. 지나간 시간은 넣지 마라. 남은 시간이 짧으면 핵심을 줄여라.\n\n") : "") +
     (energy && ENERGY_RULE[energy] ? ("[오늘 배터리] " + ENERGY_RULE[energy] + "\n\n") : "") +
     (ctx ? ("[내 프로필]\n" + ctx + "\n\n") : "") +
+    (sline ? ("[내가 실제로 쓰는 시간]\n" + sline + "\n\n") : "") +
     (mctx ? ("[식단 조건]\n" + mctx + "\n\n") : "") +
     (notes.length ? ("[최근 회고 — 반영해서 조정]\n" + notes.map(function (n) { return "- " + n.date + ": " + n.text; }).join("\n") + "\n\n") : "") +
     "[후보 과제]\n" + (list || "(없음)") +
@@ -1894,9 +1953,16 @@ function renderTabbar() {
 // ---- 실행 모드: 지금 블록 하나만 남기고 전부 치운다 ----
 let focusId = null;      // 열어둔 블록 id
 const askDraft = {};     // blockId -> 한 줄 초안 (리렌더를 견딘다)
+const focusBreaks = {};  // blockId -> 실행 모드에서 탭을 벗어난 횟수 (사실만 센다)
 let focusUntil = 0;      // 5분 타이머 종료 시각(ms). 0이면 안 돎
 let focusTick = null;
 function openFocus(id) { focusId = id; focusUntil = 0; render(); }
+// 탭을 벗어나면 센다. 화면에 평가를 쓰지 않는다 — 계획 길이를 고치는 데만 쓴다.
+function noteBreak() {
+  if (!focusId) return;
+  try { if (typeof document !== "undefined" && !document.hidden) return; } catch (e) { return; }
+  focusBreaks[focusId] = (focusBreaks[focusId] || 0) + 1;
+}
 function closeFocusQuiet() {
   focusId = null; focusUntil = 0;
   if (focusTick && typeof clearInterval !== "undefined") { clearInterval(focusTick); focusTick = null; }
@@ -2037,7 +2103,10 @@ function renderFocus() {
     fill.style.width = pct + "%";
     bar.appendChild(fill);
     box.appendChild(bar);
-    box.appendChild(el("div", { cls: "muted", text: cur < st ? ((st - cur) + "분 뒤 시작") : (Math.max(0, en - cur) + "분 남음") }));
+    const elapsed = b.startedAt ? Math.max(0, Math.round((now.getTime() - new Date(b.startedAt).getTime()) / 60000)) : null;
+    box.appendChild(el("div", { cls: "muted sessionline", text:
+      (cur < st ? ((st - cur) + "분 뒤 시작") : (Math.max(0, en - cur) + "분 남음")) +
+      (elapsed != null ? ("  ·  예상 " + (en - st) + "분 · 지금까지 " + elapsed + "분") : "") }));
   }
 
   const row = el("div", { cls: "addrow" });
@@ -3514,6 +3583,7 @@ function boot() {
   saveVisits(recordVisit(loadVisits(), todayStr()));
   render();
   if (notifyOn()) startNotifyLoop();
+  try { if (typeof document !== "undefined" && document.addEventListener) document.addEventListener("visibilitychange", noteBreak); } catch (e) {}
   try {
     if (typeof window !== "undefined" && window.addEventListener) {
       window.addEventListener("hashchange", function () { closeFocusQuiet(); render(); });
@@ -3531,7 +3601,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

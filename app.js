@@ -1152,18 +1152,33 @@ function paceLine(goal, today, profile) {
 // ---- 복습 큐 (간격 반복) ----
 // 틀린 것만 다시 뜬다. 아는 걸 다시 읽는 시간이 사라지는 게 이 기능의 값어치다.
 const K_REVIEWS = "loop.reviews";
-const REVIEW_STEPS = [1, 3, 7, 16, 35];   // 라이트너 상자 1~5의 간격(일)
+// 간격(일). 시뮬레이션(scratchpad/efficiency.js)으로 고른 값 — 15주 학기·54일 뒤 시험 기준
+// [1,3,7,16,35] 대비 시험 당일 91.2 -> 94.0, 2주 뒤 75.2 -> 88.7. 손대는 횟수는 거의 같다.
+// 최대 간격 35일은 학기보다 길어서 한 항목이 시험 전 5주를 안 보이는 일이 생겼다.
+const REVIEW_STEPS = [1, 2, 4, 8, 16];
 const REVIEW_MIN = 30;                    // 복습 블록 길이. isMicroBlock(25분)에 안 걸리게
 function loadReviews() { const v = lsGet(K_REVIEWS, []); return Array.isArray(v) ? v : []; }
 function saveReviews(v) { lsSet(K_REVIEWS, v); }
 
 // 다음 차례를 정한다. 맞히면 상자 하나 위, 틀리면 1로. (순수)
-function scheduleReview(item, correct, today) {
+const EXAM_MARGIN = 2;   // 시험 며칠 전까지는 한 번 더 본다
+function scheduleReview(item, correct, today, examDate) {
   const box = correct ? Math.min(REVIEW_STEPS.length, (item.box || 1) + 1) : 1;
   const out = {};
   Object.keys(item || {}).forEach(function (k) { out[k] = item[k]; });
   out.box = box;
   out.due = addDays(today, REVIEW_STEPS[box - 1]);
+  // 다음 차례가 시험을 넘기면 시험 직전으로 당긴다. 안 그러면 시험 전 몇 주를 안 보고 지나간다.
+  if (examDate) {
+    const toExam = daysUntil(examDate, today);
+    if (toExam != null && toExam > 0) {
+      const dueIn = daysUntil(out.due, today);
+      if (dueIn == null || dueIn > toExam) {
+        out.due = addDays(today, Math.max(1, toExam - EXAM_MARGIN));
+        out.beforeExam = true;
+      } else { delete out.beforeExam; }
+    }
+  }
   out.seen = (item.seen || 0) + 1;
   return out;
 }
@@ -1175,6 +1190,7 @@ function addReview(goalId, kind, text, today, note) {
   if (same) {                                  // 같은 걸 또 틀렸다 -> 처음으로 되돌린다
     same.box = 1;
     same.due = addDays(today, REVIEW_STEPS[0]);
+    delete same.beforeExam;
     if (note) same.missed = String(note).slice(0, 80);
     saveReviews(all);
     return same;
@@ -1232,7 +1248,8 @@ function settleReview(reviewId, note, today, correct) {
   const i = all.map(function (r) { return r.id; }).indexOf(reviewId);
   if (i < 0) return null;
   if (correct == null) correct = !String(note || "").trim();
-  const next = scheduleReview(all[i], correct, today);
+  const ex = nextExam(loadProfile(), today);
+  const next = scheduleReview(all[i], correct, today, ex && ex.date);
   if (!correct && String(note || "").trim()) next.missed = String(note).slice(0, 80);
   // 여섯 번을 봤는데도 1번 상자면 그대로 두면 매일 나온다. 열흘 물리고 쪼개라고 표시한다.
   if (isLeech(next)) { next.due = addDays(today, LEECH_REST); next.leech = true; }
@@ -3795,7 +3812,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, parseExams, nextExam, effectiveDeadline, DEFAULT_EXAMS, parseQuestions, attachQuestions, isLeech, leechItems, reviewQuota, LEECH_AT, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, EXAM_MARGIN, parseExams, nextExam, effectiveDeadline, DEFAULT_EXAMS, parseQuestions, attachQuestions, isLeech, leechItems, reviewQuota, LEECH_AT, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

@@ -28,6 +28,7 @@ const PROFILE_FIELDS = [
   { key: "rhythm", label: "하루 리듬", ph: "예: 8시 기상 1시 취침 / 오전 집중 잘됨 / 밥 먹고 나면 졸림" },
   { key: "traits", label: "나의 특성", ph: "예: 쉽게 지침 / 1시간 넘으면 딴짓 / 시작이 어려움" },
   { key: "prefs", label: "선호·비선호", ph: "예: 운동은 수영 / 아침 일찍은 싫음 / 카페에서 집중 잘됨" },
+  { key: "courses", label: "이번 학기 과목", ph: "예: 데이터베이스 / 확률과통계 / 수치해석 / 기계학습개론 / 대규모병렬컴퓨팅" },
   { key: "places", label: "자주 가는 장소 · 이동 시간", ph: "예: 경북대 중앙도서관 / 집 책상 / 카페는 3시간 이상 앉을 때만 / 수영장 · 집→학교 25분" }
 ];
 
@@ -74,6 +75,15 @@ function mealContext(profile, now) {
 }
 
 const OLD_DEFAULT_PLACES = "경북대 중앙도서관 / 집 책상 / 카페는 3시간 이상 앉을 때만 / 수영장";
+const DEFAULT_COURSES = "데이터베이스 / 확률과통계 / 수치해석 / 기계학습개론 / 대규모병렬컴퓨팅";
+// 자유 텍스트에서 과목 이름만 뽑는다 (순수)
+function parseCourses(text) {
+  return String(text || "")
+    .split(/[\/,·\n]+/)
+    .map(function (x) { return x.trim().slice(0, 30); })
+    .filter(function (x) { return x.length > 1; })
+    .slice(0, 10);
+}
 const DEFAULT_PLACES = "경북대 중앙도서관 25분 / 집 앞 스터디카페 5분 / 집 책상 / 수영장 15분 / 카페는 3시간 이상 앉을 때만";
 function loadProfile() {
   const p = lsGet(K_PROFILE, { goals: [] });
@@ -81,6 +91,7 @@ function loadProfile() {
   // migrate legacy `situation` -> `traits`
   if (p.situation && !p.traits) { p.traits = p.situation; delete p.situation; }
   // 빈 입력창을 만들지 않는다(원칙 1). 한 번도 손대지 않았을 때만 기본 장소를 채워둔다.
+  if (p.courses === undefined) p.courses = DEFAULT_COURSES;
   if (p.places === undefined) p.places = DEFAULT_PLACES;
   // 한 번도 안 고친 옛 기본값만 새 기본값으로 올린다. 직접 적은 값은 안 건드린다.
   else if (p.places === OLD_DEFAULT_PLACES) p.places = DEFAULT_PLACES;
@@ -99,6 +110,8 @@ function profileContext(profile) {
   if (r) lines.push("하루 리듬(기상~취침 안에서, 집중 잘 되는 시간에 핵심 배치): " + r);
   if (t) lines.push("나의 특성(강도·휴식 조절에 반영): " + t);
   if (pr) lines.push("선호·비선호: " + pr);
+  const co = (profile.courses || "").trim();
+  if (co) lines.push("이번 학기 과목: " + co);
   const pl = (profile.places || "").trim();
   if (pl) lines.push("자주 가는 장소·이동 시간(각 블록의 place로 쓸 것): " + pl);
   const deadlines = (profile.goals || [])
@@ -2926,6 +2939,28 @@ function renderGoalsPanel() {
   box.appendChild(el("h2", { text: "목표 · 과제" }));
   box.appendChild(el("p", { cls: "what", text: "과목을 적고 ✨ 버튼으로 프롬프트를 복사해 Gemini에 붙여넣으세요. 돌아온 목록을 다시 붙여넣으면 과제가 됩니다. 그 과제가 계획의 학습 블록이 됩니다." }));
 
+  // 학기 초 한 번. 다섯 개를 손으로 치게 두지 않는다.
+  const names = parseCourses(loadProfile().courses);
+  const missing = names.filter(function (n) {
+    return !loadProfile().goals.some(function (g) { return g.title === n; });
+  });
+  if (missing.length) {
+    const seedRow = el("div", { cls: "addrow" });
+    const sb = el("button", { cls: "mini bd", text: "＋ 과목 " + missing.length + "개를 목표로 만들기" });
+    sb.title = missing.join(" / ");
+    sb.addEventListener("click", function () {
+      const pf = loadProfile();
+      missing.forEach(function (n) {
+        pf.goals.push({ id: genId("g"), title: n, note: "", deadline: "", scope: "", tasks: [], analyzedAt: null });
+      });
+      saveProfile(pf);
+      bridgeMsg = "과목 " + missing.length + "개를 만들었습니다. 이제 ✨ 로 과제를 쪼개세요.";
+      render();
+    });
+    seedRow.appendChild(sb);
+    box.appendChild(seedRow);
+  }
+
   const grow2 = el("div", { cls: "addrow" });
   grow2.appendChild(bridgeButton("과제 쪼개기 프롬프트", "breakdown", function () {
     const pf = loadProfile();
@@ -3601,7 +3636,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

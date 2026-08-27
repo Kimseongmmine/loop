@@ -784,12 +784,16 @@ function mergeEventBlocks(blocks, text) {
 
 // ---- 데이터 백업 (브라우저 저장소는 지워질 수 있다: 사파리 7일 미접속 삭제, 용량 부족 시 오리진 통째 삭제) ----
 // API 키는 절대 내보내지 않는다. 백업 파일이 남에게 가도 키는 안 넘어간다.
-const DATA_KEYS = [K_PROFILE, K_PLANS, K_VISITS, K_ENERGY, K_NOTES, K_DONE, K_EVENTS];
+// 복습 큐·세션·막힘 기록은 파일 뒤쪽에서 선언된다. const 배열로 잡으면 TDZ 로 앱이 안 뜬다.
+// 함수로 두면 호출 시점에 읽으므로 선언 순서와 무관하다.
+function dataKeys() {
+  return [K_PROFILE, K_PLANS, K_VISITS, K_ENERGY, K_NOTES, K_DONE, K_EVENTS, K_REVIEWS, K_SESSIONS, K_STUCK];
+}
 const K_BACKUP_AT = "loop.backup_at";
 const BACKUP_NAME = "loop-backup.json";
 function exportPayload() {
   const data = {};
-  DATA_KEYS.forEach(function (k) {
+  dataKeys().forEach(function (k) {
     try { const v = localStorage.getItem(k); if (v != null) data[k] = v; } catch (e) {}
   });
   return { app: "loop", version: 1, exportedAt: new Date().toISOString(), data: data };
@@ -799,7 +803,7 @@ function applyImport(payload) {
   const p = (typeof payload === "string") ? JSON.parse(payload) : payload;
   if (!p || p.app !== "loop" || !p.data || typeof p.data !== "object") throw new Error("LOOP 백업 파일이 아닙니다");
   let n = 0;
-  DATA_KEYS.forEach(function (k) {
+  dataKeys().forEach(function (k) {
     const v = p.data[k];
     if (typeof v !== "string") return;
     try { JSON.parse(v); } catch (e) { return; }

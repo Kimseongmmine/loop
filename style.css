@@ -648,3 +648,11 @@ section.settings, section.goals {
   padding: 14px 16px; margin: 0 0 12px;
 }
 .qtextline { display: block; font-size: 17px; line-height: 1.5; font-weight: 700; color: var(--ink); margin-top: 6px; }
+
+/* 측정 — 주장 대신 센 것 */
+.measure { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin: 0 0 16px; }
+.mgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.mcell { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; background: var(--neutral-soft); border-radius: 9px; }
+.mval { font-size: 22px; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; line-height: 1.15; }
+.mlab { font-size: 12px; font-weight: 600; color: var(--ink); }
+.mnote { font-size: 11px; color: var(--dim); }

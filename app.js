@@ -1065,6 +1065,50 @@ function sessionLine(stats) {
   return parts.length ? ("실제로 걸리는 시간: " + parts.join(", ") + " (이 비율에 맞춰 블록 길이를 잡아라)") : "";
 }
 
+// ---- 측정 ----
+// 이 앱이 실제로 뭘 하고 있는지 자기 데이터로 센다. 없는 건 null 로 두고 아무 말도 안 한다.
+function studyStats(today) {
+  const revs = loadReviews();
+  const sess = loadSessions();
+  const plans = loadPlans();
+  const out = { items: 0, held: 0, holdDays: null, touches: null, perItem: null,
+                recallRate: null, startRate: null, days: 0 };
+
+  // 큐에 살아 있는 항목과, 그중 간격이 벌어진 것(=굳은 것)
+  out.items = revs.length;
+  out.held = revs.filter(function (r) { return (r.box || 1) >= 3; }).length;
+  if (revs.length) {
+    const seen = revs.reduce(function (a, r) { return a + (r.seen || 0); }, 0);
+    out.touches = seen;
+    out.perItem = Math.round((seen / revs.length) * 10) / 10;
+    // 간격이 벌어진 만큼이 "다음에 볼 때까지 버티는 날"
+    const spans = revs.map(function (r) { return REVIEW_STEPS[Math.min(REVIEW_STEPS.length, r.box || 1) - 1]; });
+    out.holdDays = Math.round((spans.reduce(function (a, b) { return a + b; }, 0) / spans.length) * 10) / 10;
+    // 인출 성공률 — 상자가 오른 횟수 / 본 횟수. seen 이 있는 것만
+    const withSeen = revs.filter(function (r) { return (r.seen || 0) > 0; });
+    if (withSeen.length) {
+      const ups = withSeen.reduce(function (a, r) { return a + Math.max(0, (r.box || 1) - 1); }, 0);
+      const all = withSeen.reduce(function (a, r) { return a + (r.seen || 0); }, 0);
+      out.recallRate = all ? Math.round((ups / all) * 100) : null;
+    }
+  }
+
+  // 핵심 블록 착수율 — 계획이 있는 날만 센다
+  let core = 0, started = 0, days = 0;
+  Object.keys(plans).forEach(function (d) {
+    if (d > today) return;
+    const bs = (plans[d].blocks || []).filter(function (b) { return b.core; });
+    if (!bs.length) return;
+    days++;
+    core += bs.length;
+    started += bs.filter(function (b) { return b.onTime; }).length;
+  });
+  out.days = days;
+  if (core) out.startRate = Math.round((started / core) * 100);
+  if (sess.length) out.sessions = sess.length;
+  return out;
+}
+
 // ---- 하루 과목 수 · 시험 역산 ----
 // 5과목을 라운드로빈하면 하루에 다섯 번 문맥이 바뀐다. 세 과목까지만 다룬다.
 const DAILY_COURSES = 3;
@@ -2148,6 +2192,8 @@ function render() {
     } else if (tab === "flow") {
       root.appendChild(renderFortune());
       root.appendChild(renderFlow());
+      const meas = renderMeasure();
+      if (meas) root.appendChild(meas);
       root.appendChild(renderNatal());
     } else if (tab === "me") {
       root.appendChild(renderSettings());
@@ -3406,6 +3452,34 @@ function renderSettings() {
 
 // 원국 카드 — 계산 결과를 그대로 보여준다. 해석은 한 줄뿐.
 const NATAL_COLS = [{ k: "year", l: "년" }, { k: "month", l: "월" }, { k: "day", l: "일" }, { k: "hour", l: "시" }];
+// 측정 카드 — 있는 숫자만 보여준다. 없으면 카드 자체가 안 뜬다.
+function renderMeasure() {
+  const st = studyStats(todayStr(new Date()));
+  if (!st.items && !st.days) return null;
+  const box = el("section", { cls: "measure" });
+  box.id = "measure";
+  box.appendChild(el("h2", { text: "지금까지 실제로" }));
+  box.appendChild(el("p", { cls: "what", text: "주장이 아니라 이 앱에 쌓인 기록입니다. 아직 없는 숫자는 안 보여줍니다." }));
+  const grid = el("div", { cls: "mgrid" });
+  function cell(label, value, note) {
+    if (value == null) return;
+    const c = el("div", { cls: "mcell" });
+    c.appendChild(el("span", { cls: "mval", text: String(value) }));
+    c.appendChild(el("span", { cls: "mlab", text: label }));
+    if (note) c.appendChild(el("span", { cls: "mnote", text: note }));
+    grid.appendChild(c);
+  }
+  cell("복습 큐에 든 항목", st.items || null);
+  cell("굳은 것 (3상자 이상)", st.items ? st.held : null, st.items ? (Math.round((st.held / st.items) * 100) + "%") : "");
+  cell("항목당 본 횟수", st.perItem);
+  cell("평균 유지 기간", st.holdDays ? (st.holdDays + "일") : null, "다음에 볼 때까지");
+  cell("인출 성공률", st.recallRate != null ? (st.recallRate + "%") : null);
+  cell("핵심 착수율", st.startRate != null ? (st.startRate + "%") : null, st.days ? (st.days + "일치") : "");
+  box.appendChild(grid);
+  if (!st.items) box.appendChild(el("p", { cls: "muted", text: "복습 기록이 아직 없습니다. 개념·유도 블록을 완료하면 여기부터 찹니다." }));
+  return box;
+}
+
 function renderNatal() {
   const n = natalChart();
   const box = el("section", { cls: "natal" });
@@ -3812,7 +3886,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, EXAM_MARGIN, parseExams, nextExam, effectiveDeadline, DEFAULT_EXAMS, parseQuestions, attachQuestions, isLeech, leechItems, reviewQuota, LEECH_AT, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, studyStats, renderMeasure, EXAM_MARGIN, parseExams, nextExam, effectiveDeadline, DEFAULT_EXAMS, parseQuestions, attachQuestions, isLeech, leechItems, reviewQuota, LEECH_AT, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

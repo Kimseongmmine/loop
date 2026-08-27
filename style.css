@@ -205,6 +205,14 @@ h2 {
 .block.isCore .txt { color: var(--ink); font-weight: 700; }
 .block:not(.isCore) .txt { color: var(--muted); }
 .block.off .txt { text-decoration: line-through; color: var(--dim); }
+
+/* 착수 창을 놓친 행. 지운 게 아니라 닫힌 것이므로 취소선이 아니라 흐리게만. */
+.block.islocked { cursor: default; }
+.block.islocked .txt,
+.block.islocked .time,
+.block.islocked .place { color: var(--faint); }
+.block.islocked input[type="checkbox"] { opacity: 0.4; cursor: default; }
+.locknote { margin-top: 10px; font-size: 13px; color: var(--muted); }
 .place { font-size: 12px; color: var(--dim); white-space: nowrap; }
 .block.isCore .place { color: var(--muted); }
 .block.isMove { opacity: 0.72; }
@@ -217,6 +225,7 @@ input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--accent);
 .block.open { background: var(--now-soft); }
 .badge { flex: none; margin-left: auto; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 3px; letter-spacing: 0.06em; border: 1px solid currentColor; background: transparent !important; }
 .badge.late { color: var(--muted); }
+.badge.locked { color: var(--faint); }
 .badge.ontime { color: var(--ok); }
 .badge.now { color: var(--now); }
 
@@ -583,3 +592,27 @@ section.settings, section.goals {
   border: 1px solid transparent; border-radius: 999px; cursor: pointer;
 }
 .backbtn:hover { border-color: var(--accent); }
+
+/* ===== 학습 엔진 (v3) ===== */
+/* 과제 유형 칩 — 색은 쓰지 않는다. 물·금 팔레트 안에서 굵기와 테두리로만 구분 */
+.kindchip {
+  flex: none; font-size: 10px; font-weight: 800; letter-spacing: 0.06em;
+  padding: 2px 7px; border-radius: 4px;
+  color: var(--dim); border: 1px solid var(--line);
+}
+.kindchip.k3 { color: var(--accent); border-color: var(--accent); }  /* 구현 — 제일 무거운 유형 */
+.block.isCore .kindchip { color: var(--muted); }
+
+/* Gemini로 보내기 */
+.bridge { margin: 10px 0 0; }
+.bridgemsg {
+  font-size: 12px; font-weight: 700; color: var(--accent);
+  background: var(--accent-soft); border-radius: 7px; padding: 8px 11px; margin-bottom: 8px;
+}
+.promptbox {
+  width: 100%; min-height: 90px; resize: vertical; margin: 6px 0;
+  background: var(--card); border: 1px solid var(--field-line); border-radius: 8px;
+  color: var(--ink); font: inherit; font-size: 12px; line-height: 1.55; padding: 10px 11px;
+  white-space: pre; overflow-x: auto;
+}
+.promptbox:focus { outline: 2px solid var(--accent); outline-offset: 1px; }

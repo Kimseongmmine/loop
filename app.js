@@ -219,7 +219,11 @@ function nextPendingTasks(profile, n) {
     for (let q = 0; q < queues.length; q++) {
       const qq = queues[q];
       if (qq.tasks[i]) {
-        out.push({ goalId: qq.goal.id, goalTitle: qq.goal.title, taskId: qq.tasks[i].id, text: qq.tasks[i].text });
+        const tk = qq.tasks[i];
+        out.push({
+          goalId: qq.goal.id, goalTitle: qq.goal.title, taskId: tk.id, text: tk.text,
+          kind: tk.kind || taskKind(tk.text, qq.goal.title)
+        });
         progressed = true;
         if (out.length >= n) break;
       }
@@ -442,12 +446,31 @@ async function orChat(messages, maxTokens, parse) {
 }
 
 // Google Gemini — single reliable call with JSON-friendly output
+// 한 번 쏘고 마는 대신, 한도(429)·일시 장애(503)에는 잠깐 쉬었다 다시, 그다음 다른 모델로.
+const GEM_FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.5-flash"];
+function isQuotaError(msg) { return /429|quota|rate limit|resource_exhausted/i.test(String(msg || "")); }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 async function geminiChat(messages, maxTokens, parse) {
   const key = getGemKey();
   if (!key || typeof fetch === "undefined") { lastAIError = "Gemini 키가 없습니다."; return null; }
+  const tried = {};
+  const order = [getGemModel()].concat(GEM_FALLBACK_MODELS).filter(function (m) {
+    if (!m || tried[m]) return false; tried[m] = true; return true;
+  });
+  for (let i = 0; i < order.length; i++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const v = await geminiOnce(key, order[i], messages, maxTokens, parse);
+      if (v != null) { lastAIError = ""; return v; }
+      if (!isQuotaError(lastAIError) || attempt) break;   // 한도 문제일 때만 한 번 쉬었다 재시도
+      await sleep(1200);
+    }
+  }
+  return null;
+}
+async function geminiOnce(key, model, messages, maxTokens, parse) {
   const sys = messages.filter(function (m) { return m.role === "system"; }).map(function (m) { return m.content; }).join("\n");
   const userParts = messages.filter(function (m) { return m.role !== "system"; }).map(function (m) { return { text: m.content }; });
-  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + getGemModel() + ":generateContent?key=" + encodeURIComponent(key);
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + encodeURIComponent(key);
   const body = { contents: [{ role: "user", parts: userParts }], generationConfig: { maxOutputTokens: maxTokens || 4096, temperature: 0.6 } };
   // force clean JSON output when the caller expects to parse it (no preamble / reasoning text)
   if (parse) body.generationConfig.responseMimeType = "application/json";
@@ -457,7 +480,7 @@ async function geminiChat(messages, maxTokens, parse) {
     if (!res.ok) {
       let b = ""; try { b = await res.text(); } catch (e) {}
       let msg = b; try { const j = JSON.parse(b); msg = (j.error && j.error.message) || b; } catch (e) {}
-      lastAIError = "Gemini HTTP " + res.status + " · " + String(msg).slice(0, 200);
+      lastAIError = "Gemini HTTP " + res.status + " · " + String(msg).slice(0, 200) + " [" + model + "]";
       return null;
     }
     const data = await res.json();
@@ -477,7 +500,15 @@ async function geminiChat(messages, maxTokens, parse) {
 
 // route to whichever provider has a key (Gemini preferred for reliability)
 async function aiChat(messages, maxTokens, parse) {
-  if (getGemKey()) return geminiChat(messages, maxTokens, parse);
+  if (getGemKey()) {
+    const v = await geminiChat(messages, maxTokens, parse);
+    if (v != null) return v;
+    if (!getKey()) return null;
+    const gemErr = lastAIError;
+    const w = await orChat(messages, maxTokens, parse);      // Gemini가 죽으면 예비 경로를 쓴다
+    if (w == null) lastAIError = gemErr + " / " + lastAIError;
+    return w;
+  }
   return orChat(messages, maxTokens, parse);
 }
 
@@ -551,8 +582,9 @@ function fillPlaces(blocks, profile) {
     if (/수영|헬스|운동/.test(t)) place = r.gym;
     else if (/기상|취침|잠자|샤워/.test(t)) place = r.home;
     else if (b.taskId || b.core || /집중|공부|복습|정리|풀기|강의|과제|독서/.test(t)) {
-      // 저녁엔 멀리 안 나간다 — 집 근처 학습 장소
-      if (st != null && st >= EVENING_MIN) place = r.night;
+      // 구현 과제는 집 노트북에서 다 된다 (사용자 확인) — 이동을 만들 이유가 없다
+      if (b.kind === "구현") place = r.home;
+      else if (st != null && st >= EVENING_MIN) place = r.night;   // 저녁엔 멀리 안 나간다
       else place = len >= LONG_STUDY_MIN ? r.cafe : r.lib;
     }
     else if (/점심|저녁|아침|식사|휴식|산책|물|눈|쉬/.test(t)) place = (prev && prev !== r.gym) ? prev : r.home;
@@ -756,7 +788,7 @@ function askPersist() {
 function templatePlan(candidates) {
   const c = candidates || [];
   function study(i, time) {
-    if (c[i]) return { id: genId("b"), time: time, text: c[i].text, goalId: c[i].goalId, taskId: c[i].taskId, core: true, done: false };
+    if (c[i]) return { id: genId("b"), time: time, text: retrievalText(c[i].text, c[i].kind), goalId: c[i].goalId, taskId: c[i].taskId, kind: c[i].kind || null, core: true, done: false };
     // 후보 과제가 없을 때도 핵심 슬롯은 비우지 않는다. 첫 슬롯만 살리고 나머지는 여백으로.
     if (i === 0) return { id: genId("b"), time: time, text: "집중 블록 — 아래 설정에서 목표를 적으면 여기가 채워집니다", goalId: null, taskId: null, core: true, done: false };
     return { id: genId("b"), time: time, text: "집중 블록 (자유)", goalId: null, taskId: null, core: false, done: false };
@@ -772,7 +804,7 @@ function templatePlan(candidates) {
     life("15:50-16:00", "물 한 잔 · 눈 휴식"),
     life("16:00-17:00", "운동 (수영 우선)"),
     life("17:00-19:00", "저녁 · 휴식"),
-    c[3] ? { id: genId("b"), time: "19:00-21:00", text: c[3].text, goalId: c[3].goalId, taskId: c[3].taskId, core: false, done: false }
+    c[3] ? { id: genId("b"), time: "19:00-21:00", text: retrievalText(c[3].text, c[3].kind), goalId: c[3].goalId, taskId: c[3].taskId, kind: c[3].kind || null, core: false, done: false }
          : life("19:00-21:00", "가벼운 복습 · 정리"),
     life("21:00-22:00", "오늘 기록 · 독서")
   ];
@@ -783,10 +815,13 @@ function mapAIBlocks(aiBlocks, candidates) {
   if (!Array.isArray(aiBlocks)) return null;
   const out = aiBlocks.map(function (b) {
     const ref = (typeof b.ref === "number") ? candidates[b.ref] : null;
+    const kind = ref ? (ref.kind || null) : null;
+    const raw = String((ref ? (b.text || ref.text) : b.text) || "").slice(0, 80);
     return {
       id: genId("b"),
       time: String(b.time || "").slice(0, 20),
-      text: String((ref ? (b.text || ref.text) : b.text) || "").slice(0, 80),
+      text: ref ? retrievalText(raw, kind) : raw,
+      kind: kind,
       goalId: ref ? ref.goalId : null,
       taskId: ref ? ref.taskId : null,
       place: String(b.place || "").slice(0, 24) || null,
@@ -827,6 +862,30 @@ function isOnTime(block, date, now) {
   if (start == null) return false;
   const cur = now.getHours() * 60 + now.getMinutes();
   return Math.abs(cur - start) <= ON_TIME_MIN;
+}
+
+// 착수 창. 시작 ±ON_TIME_MIN 안에서만 착수할 수 있고, 놓치면 그 블록은 닫힌다.
+// 완료는 막지 않는다 — 이미 착수한 두 시간짜리 블록은 끝나고 눌러야 하기 때문.
+// 시각을 못 읽는 블록은 잠그지 않는다(영영 못 누르는 행을 만들지 않는다).
+function startWindow(block, date, now) {
+  now = now || new Date();
+  const start = blockStartMinutes(block && block.time);
+  if (start == null) return { open: true, state: "free" };
+  const today = todayStr(now);
+  if (date > today) return { open: false, state: "future" };   // 내일 계획은 미리 못 누른다
+  if (date < today) return { open: false, state: "missed" };
+  const d = (now.getHours() * 60 + now.getMinutes()) - start;
+  if (d < -ON_TIME_MIN) return { open: false, state: "early" };
+  if (d > ON_TIME_MIN) return { open: false, state: "missed" };
+  return { open: true, state: "open" };
+}
+
+const LOCK_LABEL = { early: "아직", missed: "놓침", future: "내일" };
+function lockReason(w) {
+  if (!w || w.open) return "";
+  if (w.state === "early") return "시작 " + ON_TIME_MIN + "분 전부터 누를 수 있습니다";
+  if (w.state === "future") return "그날이 되면 누를 수 있습니다";
+  return "착수할 수 있는 시간(시작 ±" + ON_TIME_MIN + "분)이 지났습니다";
 }
 
 // "09:00-11:00" -> 끝 시각(분). 끝이 없으면 시작+60
@@ -901,9 +960,154 @@ function daySummary(plan) {
   };
 }
 
+// ---- 브리지: 앱이 아는 사실을 프롬프트에 박아 Gemini 앱으로 보낸다 ----
+// 무료 API 티어를 쥐어짜는 대신, 무거운 추론은 사용자가 쓰는 유료 Gemini 앱이 한다.
+// 이 상수들이 이 기능의 본체다. 나중에 Gemini에게 "이 프롬프트를 개선해줘" 하고 여기만 갈아끼우면 된다.
+const PROMPTS = {
+  breakdown:
+    "너는 컴퓨터공학 전공 3학년의 학습 코치다. 아래 과목들을 이번 학기에 실제로 완수하려면 뭘 해야 하는지 구체적 과제로 쪼개라.\n\n" +
+    "규칙\n" +
+    "- 각 과제는 한 번에 60분 안에 끝낼 수 있어야 한다\n" +
+    "- '무엇을 얼마나'가 명확해야 한다. 추상적 표현 금지('공부하기', '정리하기', '복습하기')\n" +
+    "- 좋은 예: '3장 연습문제 1~10번 풀기', 'CUDA 행렬곱 커널 짜고 로컬 테스트', '정규화 1NF~3NF 정의 백지에 쓰기'\n" +
+    "- 코드를 짜는 과제는 '짜기'/'디버깅'처럼 동작이 드러나게 써라\n" +
+    "- 과목마다 6~8개, 쉬운 것부터 순서대로\n\n" +
+    "출력은 아래 형식만. 인사·설명·머리말 없이 바로 시작하라.\n" +
+    "## 과목이름\n1. 과제\n2. 과제\n## 다음 과목이름\n1. 과제",
+
+  retrieval:
+    "너는 내 학습 코치다. 아래 항목들을 내가 \"안 보고\" 답할 수 있는지 확인하는 문제로 바꿔라.\n\n" +
+    "규칙\n" +
+    "- 항목당 문제 1~2개\n" +
+    "- 개념·유도 항목은 백지에 재현하게 하는 문제로 ('~을 유도하라', '~의 정의와 조건을 쓰라')\n" +
+    "- 구현 항목은 코드를 쓰게 하지 말고 판단을 물어라 ('이 증상이면 뭘 먼저 확인하나')\n" +
+    "- 내가 틀렸던 지점이 적혀 있으면 그 지점을 반드시 건드려라\n" +
+    "- 답은 문제 뒤에 몰아서 '---' 아래에 한꺼번에 둬라. 먼저 풀 수 있게\n\n" +
+    "출력은 문제 목록부터 바로 시작하라.",
+
+  stuck:
+    "지금 막혔다. 답을 통째로 주지 말고 다음 한 걸음만 알려줘.\n\n" +
+    "규칙\n" +
+    "- 먼저 내가 뭘 잘못 짚고 있는지 한 문장\n" +
+    "- 그다음 지금 당장 할 수 있는 확인 하나만\n" +
+    "- 전체 해답과 완성 코드는 내가 다시 요청할 때까지 주지 마라\n" +
+    "- 위로하거나 격려하지 마라. 사실과 다음 동작만",
+
+  pace:
+    "내 진도가 현실적인지 봐줘. 위로하지 말고 숫자로만 답해라.\n\n" +
+    "답할 것\n" +
+    "1. 지금 페이스로 마감까지 끝나는가 (된다/안 된다 + 며칠 초과)\n" +
+    "2. 안 되면 무엇을 버려야 하는가. 버릴 우선순위를 이유와 함께\n" +
+    "3. 남은 기간에 시험 점수를 가장 크게 올리는 항목 3개\n\n" +
+    "격려·응원 문장은 넣지 마라."
+};
+
+// 앱이 아는 사실 + 고정 프롬프트 = 붙여넣을 것 (순수)
+function buildPrompt(kind, ctx) {
+  const c = ctx || {};
+  const head = PROMPTS[kind];
+  if (!head) return "";
+  const lines = [head, ""];
+  if (kind === "breakdown") {
+    lines.push("[내 과목]");
+    (c.goals || []).forEach(function (g) {
+      lines.push("- " + g.title +
+        (g.scope ? (" · 범위 " + g.scope) : "") +
+        (g.deadline ? (" · 마감/시험 " + g.deadline) : "") +
+        (g.note ? (" · " + g.note) : ""));
+    });
+    if (c.traits) lines.push("", "[내 특성 — 참고]", c.traits);
+  } else if (kind === "retrieval") {
+    lines.push("[오늘 확인할 것]");
+    (c.items || []).forEach(function (it) {
+      lines.push("- (" + (it.course || "과목") + " · " + (it.kind || "개념") + ") " + it.text +
+        (it.missed ? ("  — 지난번 틀린 곳: " + it.missed) : ""));
+    });
+  } else if (kind === "stuck") {
+    lines.push("[상황]");
+    lines.push("과목: " + (c.course || "-") + " (" + (c.kind || "-") + ")");
+    lines.push("지금 하는 것: " + (c.text || "-"));
+    lines.push("막힌 지점: " + (c.note || "(아직 안 적음)"));
+    if (c.past && c.past.length) lines.push("전에 같은 과목에서 막혔던 곳: " + c.past.join(" / "));
+  } else if (kind === "pace") {
+    lines.push("[상황] 오늘 " + (c.today || ""));
+    (c.goals || []).forEach(function (g) {
+      lines.push("- " + g.title +
+        (g.deadline ? (" · 마감 " + g.deadline + (g.daysLeft != null ? (" (D-" + g.daysLeft + ")") : "")) : " · 마감 미정") +
+        (g.scope ? (" · 범위 " + g.scope) : "") +
+        " · 과제 " + g.done + "/" + g.total + " 완료");
+    });
+    if (c.recent) lines.push("", "[최근 실제 진도] " + c.recent);
+  }
+  return lines.join("\n");
+}
+
+// Gemini가 돌려준 목록을 다시 읽는다. "## 과목" + 번호 목록. (순수)
+function parseCourseTasks(text) {
+  const out = {};
+  let cur = null;
+  String(text || "").split(/\r?\n/).forEach(function (line) {
+    const h = line.match(/^\s*#{1,4}\s*(.+?)\s*$/) || line.match(/^\s*\[(.+?)\]\s*$/);
+    if (h) { cur = h[1].replace(/[:：]\s*$/, "").trim(); if (cur) out[cur] = out[cur] || []; return; }
+    const li = line.match(/^\s*(?:\d{1,2}[.)]|[-*•])\s*(.+?)\s*$/);
+    if (li && cur && li[1].length > 1) out[cur].push(li[1].replace(/\*\*/g, "").trim());
+  });
+  Object.keys(out).forEach(function (k) { if (!out[k].length) delete out[k]; });
+  return out;
+}
+
+// ---- 과제 유형 ----
+// 무료 모델에게 묻지 않는다. 5과목이 정해져 있어 패턴이 좁고, 규칙이 더 정확하고 0원·0지연이다.
+const KINDS = ["개념", "문제", "유도", "구현"];
+// 과목이 주로 어떤 일인지 (기본값)
+const COURSE_KIND = [
+  { re: /병렬|cuda|gpu|컴퓨팅|시스템|운영체제|네트워크/i, kind: "구현" },
+  { re: /확률|통계|확통|선형대수/i, kind: "문제" },
+  { re: /수치해석|수치|알고리즘|이산/i, kind: "유도" },
+  { re: /기계학습|머신러닝|딥러닝|인공지능|ml\b/i, kind: "유도" },
+  { re: /데이터베이스|데베|\bdb\b|컴파일러|소프트웨어/i, kind: "개념" }
+];
+function courseKind(title) {
+  const t = String(title || "");
+  for (let i = 0; i < COURSE_KIND.length; i++) if (COURSE_KIND[i].re.test(t)) return COURSE_KIND[i].kind;
+  return "개념";
+}
+// 과제 문장이 과목 기본값을 덮는다. 순서가 곧 우선순위다.
+const TASK_KIND = [
+  { re: /cuda|커널|kernel|sql|numpy|파이썬|python|코드|구현|디버그|디버깅|실습|컴파일|프로파일|짜기|돌려|실행/i, kind: "구현" },
+  { re: /유도|증명|수렴|보장|전개|도출/, kind: "유도" },
+  { re: /연습문제|기출|풀기|계산|\d+\s*번/, kind: "문제" }
+];
+function taskKind(text, goalTitle) {
+  const t = String(text || "");
+  for (let i = 0; i < TASK_KIND.length; i++) if (TASK_KIND[i].re.test(t)) return TASK_KIND[i].kind;
+  return courseKind(goalTitle);
+}
+// 유형마다 필요한 최소 길이가 다르다. 구현은 컴파일·디버깅 사이클이 들어간다.
+const KIND_MIN = { 구현: 90, 문제: 60, 유도: 60, 개념: 40 };
+const KIND_TARGET = { 구현: 110, 문제: 75, 유도: 75, 개념: 50 };
+function blockMinutesFor(kind) {
+  return { min: KIND_MIN[kind] || 60, target: KIND_TARGET[kind] || 60 };
+}
+// 다시 읽기 대신 안 보고 인출. 학습과학에서 안 깎인 두 축 중 하나다.
+// 코드는 백지가 안 통하므로 구현·문제에는 안 붙인다.
+function retrievalText(text, kind) {
+  const t = String(text || "");
+  if (!t || /안 보고/.test(t)) return t;
+  if (kind === "개념") return "안 보고 써보기 — " + t;
+  if (kind === "유도") return "안 보고 유도 — " + t;
+  return t;
+}
+
 // ---- 첫 동작: 그 자리에 도착해서 5분 안에 끝나는 물리적 동작 하나 ----
 // 시작이 막히는 지점은 "장소"가 아니라 "다음 몸동작"이 비어 있는 것이다.
 const FIRST_SKIP = /점심|저녁|아침|식사|휴식|산책|물 한 잔|눈 휴식|기상|취침|잠자/;
+const KIND_FIRST = {
+  구현: "터미널 열고 빌드/실행 한 번 돌리기",
+  문제: "첫 1문제만 풀기",
+  유도: "결과 식만 적어놓고 백지에서 거슬러 올라가기",
+  개념: "목차만 보고 백지에 아는 것 쏟기"
+};
 function firstStep(block) {
   const b = block || {};
   if (b.first) return String(b.first);
@@ -911,6 +1115,7 @@ function firstStep(block) {
   if (b.move) return "지금 일어나서 나가기";
   if (/수영|헬스|운동/.test(t)) return "옷 갈아입고 가방 챙기기";
   if (b.event || FIRST_SKIP.test(t)) return null;
+  if (b.kind && KIND_FIRST[b.kind]) return KIND_FIRST[b.kind];
   if (b.taskId || b.core || /집중|공부|복습|정리|풀기|강의|과제|독서|문제/.test(t)) {
     const short = t.length > 26 ? (t.slice(0, 26) + "…") : t;
     return "자리에 앉아 " + short + " · 5분만";
@@ -930,6 +1135,63 @@ function coreStatus(blocks) {
 }
 
 // toggle a block; sync its linked goal task
+const K_STUCK = "loop.stuck";   // { goalId: ["막혔던 지점", ...] }
+function loadStuck() { return lsGet(K_STUCK, {}) || {}; }
+function addStuck(goalId, text) {
+  const t = String(text || "").trim();
+  if (!goalId || !t) return;
+  const all = loadStuck();
+  all[goalId] = (all[goalId] || []).concat([t.slice(0, 80)]).slice(-20);
+  lsSet(K_STUCK, all);
+}
+
+// ---- 브리지 UI 상태 ----
+let bridgeMsg = "";
+let promptText = "";     // 클립보드가 막혔을 때 직접 복사하라고 띄우는 원문
+let pasteOpen = false;
+
+function copyPrompt(text) {
+  bridgeMsg = "";
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        bridgeMsg = "복사됐습니다. Gemini에 붙여넣으세요.";
+        promptText = "";
+        render();
+      }, function () { promptText = text; render(); });
+      return;
+    }
+  } catch (e) {}
+  promptText = text;      // 클립보드 API가 없거나 막힘 → 직접 복사
+  render();
+}
+
+// Gemini가 준 목록을 목표에 넣는다. 제목이 겹치는 목표를 찾고, 없으면 만든다.
+function importCourseTasks(text) {
+  const map = parseCourseTasks(text);
+  const names = Object.keys(map);
+  if (!names.length) return 0;
+  const p = loadProfile();
+  let n = 0;
+  names.forEach(function (name) {
+    let g = p.goals.filter(function (x) {
+      return x.title.indexOf(name) >= 0 || name.indexOf(x.title) >= 0;
+    })[0];
+    if (!g) { g = { id: genId("g"), title: name, note: "", tasks: [], analyzedAt: null }; p.goals.push(g); }
+    const have = {};
+    (g.tasks || []).forEach(function (t) { have[t.text] = true; });
+    map[name].slice(0, 12).forEach(function (txt) {
+      const t = String(txt).slice(0, 70);
+      if (have[t]) return;
+      g.tasks.push({ id: genId("t"), text: t, done: false, kind: taskKind(t, g.title) });
+      n++;
+    });
+    g.analyzedAt = new Date().toISOString();
+  });
+  if (n) saveProfile(p);
+  return n;
+}
+
 // ---- 계획 고치기 ----
 // AI가 하루 뼈대를 정하고, 사용자는 자리만 바꾼다. 시각은 그대로 두고 내용을 옮긴다.
 // 이렇게 하면 특별 일정과 이미 지나간 블록이 밀려나지 않는다.
@@ -1038,6 +1300,7 @@ function setBlockStarted(date, blockId, now) {
   if (!plan) return null;
   const block = plan.blocks.find(function (b) { return b.id === blockId; });
   if (!block || block.started) return block || null;
+  if (!startWindow(block, date, now).open) return null;   // 창 밖이면 착수 자체가 안 된다
   block.started = true;
   block.startedAt = (now || new Date()).toISOString();
   block.onTime = isOnTime(block, date, now);
@@ -1051,6 +1314,9 @@ function setBlockDone(date, blockId, checked, now) {
   if (!plan) return;
   const block = plan.blocks.find(function (b) { return b.id === blockId; });
   if (!block) return;
+  // 착수 없이 완료부터 누르는 건 그 순간의 착수와 같다 → 창이 닫혔으면 그것도 막는다.
+  // 이미 착수한 블록의 완료·해제는 언제든 된다.
+  if (checked && !block.started && !startWindow(block, date, now).open) return;
   block.done = checked;
   // 착수 기록 없이 완료부터 누른 경우엔 그 순간을 착수로 본다(예전 데이터와 같은 뜻).
   if (checked && !block.started) {
@@ -1092,7 +1358,10 @@ async function aiBreakdownGoal(goal) {
     "\n\n이 목표를 완수하기 위한 구체적 과제 목록:";
   const list = await aiChat([{ role: "system", content: sys }, { role: "user", content: usr }], 1500, parseTaskList);
   if (list) {
-    return list.slice(0, 10).map(function (t) { return { id: genId("t"), text: String(t).slice(0, 70), done: false }; });
+    return list.slice(0, 10).map(function (t) {
+      const text = String(t).slice(0, 70);
+      return { id: genId("t"), text: text, done: false, kind: taskKind(text, goal.title) };
+    });
   }
   return null;
 }
@@ -1116,14 +1385,13 @@ async function aiGeneratePlan(candidates, targetDate, opts) {
     "후보 과제를 시간표에 배치하고(각 블록 ref에 후보 index), 휴식/식사/운동/고정일정 같은 생활 블록은 ref 없이 넣어라. " +
     "가장 중요한 3개 학습 블록에만 core:true. " +
     "이 사람은 쉽게 지치고 눈이 건조하다: 딥워크 사이에 '물 마시기·눈 휴식(먼 곳 보기)' 같은 짧은 회복 블록을 최소 2개 넣어라. " +
-    "모든 블록에 place(장소)를 넣어라. 규칙: 연속 학습이 3시간 이상일 때만 카페, 그보다 짧으면 도서관. 고정 일정은 그 일정에 적힌 장소. 아침·밤 정리는 집. 운동은 [내 프로필]의 운동 장소. " +
-        "저녁(18시 이후) 학습은 멀리 나가지 말고 [내 프로필]의 집 근처 학습 장소를 써라. " +
-    "장소가 바뀌면 그 사이에 이동 블록을 넣어라: text는 \"이동 · A → B\", place는 빈 문자열, core는 false. 이동 시간은 **앞 블록을 그만큼 일찍 끝내서** 만들어라(뒤 블록을 깎지 마라). " +
+    "코드를 짜는 과제(CUDA·SQL·구현·디버깅)는 컴파일과 디버깅 사이클이 들어가므로 90분 미만으로 쪼개지 마라. " +
     "학습·운동 블록마다 first(첫 동작)를 넣어라: 그 장소에 도착해서 5분 안에 끝나는 물리적 동작 하나. 20자 내외로 아주 구체적으로('노트북 열고 3장 1번 문제만 읽기', '수경 챙겨서 탈의실 들어가기'). 추상적 표현 금지. 휴식·식사·이동에는 넣지 마라. " +
         "[특별 일정]이 있으면 그 시각을 그 일정 블록으로 채우고, 원래 그 시간에 넣으려던 학습은 다른 시간으로 옮겨라. 시각이 없는 일정은 그날 안의 적절한 시간에 넣어라. " +
     "meals에는 그날의 아침·점심·저녁을 제안한다. 규칙: [식단 조건]의 '지금 있는 재료'를 최대한 활용하고, 못 먹는 것은 반드시 제외하며, 조리 조건·목표(감량/증량/유지)·열량 추정치를 반영한다. 한 끼 20자 내외로 구체적으로. " +
     "shopping에는 지금 재료로 부족해서 사두면 좋은 것을 3~6개, 짧은 품목명으로 넣는다(이미 있다고 적힌 재료는 넣지 마라). 재료 정보가 없으면 shopping은 빈 배열. " +
-    "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"place\":\"중앙도서관\",\"first\":\"노트북 열고 3장 1번만 읽기\",\"ref\":0,\"core\":true}]," +
+    "장소와 첫 동작은 앱이 알아서 채우니 넣지 마라. " +
+    "오직 JSON만: {\"blocks\":[{\"time\":\"09:00-11:00\",\"text\":\"...\",\"ref\":0,\"core\":true}]," +
     "\"meals\":{\"아침\":\"...\",\"점심\":\"...\",\"저녁\":\"...\"},\"shopping\":[\"품목1\",\"품목2\"]}";
   const ctx = profileContext(loadProfile());
   const evt = targetDate ? getEvent(targetDate) : "";
@@ -1220,19 +1488,9 @@ async function generatePlan(targetDate, opts) {
 
   try {
     const aiOn = hasAI();
-    // 1) break down any goal that has no tasks (AI)
-    if (aiOn) {
-      const profile = loadProfile();
-      let changed = false;
-      for (let i = 0; i < profile.goals.length; i++) {
-        const g = profile.goals[i];
-        if (!g.tasks || g.tasks.length === 0) {
-          const tasks = await aiBreakdownGoal(g);
-          if (tasks) { g.tasks = tasks; g.analyzedAt = new Date().toISOString(); changed = true; }
-        }
-      }
-      if (changed) saveProfile(profile);
-    }
+    // 과제 쪼개기는 여기서 하지 않는다. 5과목이면 콜이 6번 나가 무료 한도를 바로 넘긴다.
+    // 쪼개기는 목표 탭의 "✨ 과제 쪼개기 프롬프트" → Gemini 앱 → 붙여넣기로 한다(쿼터 0).
+    // 여기서 쓰는 콜은 시간표 배치 한 번뿐이다.
     // 2) build the hourly plan (AI, else template)
     const candidates = nextPendingTasks(loadProfile(), 6);
     let blocks = null, meals = null, shopping = null, source = "template";
@@ -1555,21 +1813,43 @@ function renderFocus() {
     five.addEventListener("click", function () { setBlockStarted(date, b.id, new Date()); startFive(); });
     row.appendChild(five);
   }
+  // 착수 창이 닫혔으면 기록 버튼은 잠긴다. 타이머는 그대로 돈다 — 잠긴 건 기록이지 실행이 아니다.
+  const fwin = startWindow(b, date, now);
+  const flocked = !b.started && !b.done && !fwin.open;
   if (!b.started) {
     const sb = el("button", { cls: "mini", text: "시작 기록" });
-    sb.addEventListener("click", function () { setBlockStarted(date, b.id, new Date()); render(); });
+    if (flocked) { sb.disabled = true; sb.title = lockReason(fwin); }
+    else sb.addEventListener("click", function () { setBlockStarted(date, b.id, new Date()); render(); });
     row.appendChild(sb);
   } else {
     row.appendChild(el("span", { cls: "muted", text: "시작 " + localHHMM(b.startedAt) + (b.onTime ? " · 정시" : "") }));
   }
   if (!b.done) {
     const db = el("button", { cls: "mini", text: "완료" });
-    db.addEventListener("click", function () { setBlockDone(date, b.id, true, new Date()); render(); });
+    if (flocked) { db.disabled = true; db.title = lockReason(fwin); }
+    else db.addEventListener("click", function () { setBlockDone(date, b.id, true, new Date()); render(); });
     row.appendChild(db);
   } else {
     row.appendChild(el("span", { cls: "muted", text: "완료됨" }));
   }
   box.appendChild(row);
+  if (flocked) box.appendChild(el("div", { cls: "locknote", text: lockReason(fwin) }));
+
+  // 막혔을 때 — 답이 아니라 다음 한 걸음만 물어보는 프롬프트
+  const stuck = el("div", { cls: "addrow" });
+  stuck.appendChild(bridgeButton("막힘 — 다음 한 걸음만", "stuck", function () {
+    const pf = loadProfile();
+    const g = findGoal(pf, b.goalId);
+    return {
+      course: g ? g.title : "",
+      kind: b.kind || "",
+      text: String(b.text).replace(/^안 보고 (써보기|유도) — /, ""),
+      note: b.missed || "",
+      past: (loadStuck()[b.goalId] || []).slice(-3)
+    };
+  }));
+  box.appendChild(stuck);
+  if (bridgeMsg || promptText) box.appendChild(bridgeBox({}));
 
   const rest = plan.blocks.filter(function (x2) {
     return x2.id !== b.id && !x2.done && (blockStartMinutes(x2.time) || 0) >= (st || 0);
@@ -2015,14 +2295,20 @@ function renderToday() {
       h.setAttribute("aria-hidden", "true");
       row.appendChild(h);
     }
+    // 착수 창이 닫혔으면 체크 자체가 안 된다. 이미 착수·완료한 행은 그대로 둔다.
+    const win = startWindow(bk, target, new Date());
+    const locked = !bk.started && !bk.done && !win.open;
+    if (locked) row.className += " islocked";
     const cb = el("input");
     cb.type = "checkbox";
     cb.checked = !!bk.done;
+    if (locked) { cb.disabled = true; cb.title = lockReason(win); }
     cb.addEventListener("change", function () { setBlockDone(target, bk.id, cb.checked, new Date()); render(); });
     row.appendChild(cb);
     row.appendChild(el("span", { cls: "time", text: bk.time }));
     if (bk.core) { const dotm = el("span", { cls: "coremark", text: "●" }); dotm.setAttribute("aria-hidden", "true"); row.appendChild(dotm); }
     row.appendChild(el("span", { cls: "txt", text: bk.text }));
+    if (bk.kind) row.appendChild(el("span", { cls: "kindchip k" + KINDS.indexOf(bk.kind), text: bk.kind }));
     if (bk.place) row.appendChild(el("span", { cls: "place", text: bk.place }));
     if (bk.event) row.appendChild(el("span", { cls: "badge evtb", text: "일정" }));
     if (editing) {
@@ -2046,7 +2332,8 @@ function renderToday() {
       }
       return row;
     }
-    if (!bk.started && !bk.done && open) {
+    // 창이 열려 있으면 진행 중이 아니어도 시작 버튼을 보여준다(창은 시작 5분 전에 열린다)
+    if (!bk.started && !bk.done && win.open && (open || win.state === "open")) {
       const sb = el("button", { cls: "mini startb", text: "시작" });
       sb.addEventListener("click", function (e) {
         if (e && e.preventDefault) e.preventDefault();
@@ -2057,6 +2344,7 @@ function renderToday() {
     }
     if (bk.onTime) row.appendChild(el("span", { cls: "badge ontime", text: "착수" }));
     else if (bk.started || bk.done) row.appendChild(el("span", { cls: "badge late", text: "늦음" }));
+    else if (locked && win.state === "missed") row.appendChild(el("span", { cls: "badge locked", text: "놓침" }));
     else if (open) row.appendChild(el("span", { cls: "badge now", text: "지금" }));
     if (bk.done) row.appendChild(el("span", { cls: "badge fin", text: "완료" }));
     return row;
@@ -2142,15 +2430,37 @@ function renderToday() {
   }
   if (plan.source === "template") {
     if (hasAI()) {
-      const errp = el("p", { cls: "err", text: "AI 실패 → 기본 템플릿. 이유: " + (lastAIError || "알 수 없음") });
+      const quota = isQuotaError(lastAIError);
+      const errp = el("p", { cls: "err", text: quota
+        ? "오늘 무료 API 한도를 다 썼습니다. 기본 템플릿으로 짰습니다."
+        : ("AI 실패 → 기본 템플릿. 이유: " + (lastAIError || "알 수 없음")) });
       errp.setAttribute("role", "alert");
       box.appendChild(errp);
-      box.appendChild(el("p", { cls: "muted", text: "설정에서 Gemini 키를 넣으면 가장 안정적이에요. 또는 다시 생성." }));
+      box.appendChild(el("p", { cls: "muted", text: quota
+        ? "목표 탭의 ✨ 프롬프트를 Gemini 앱에 붙여넣으면 한도와 상관없이 됩니다."
+        : "설정에서 Gemini 키를 넣으면 가장 안정적이에요. 또는 다시 생성." }));
     } else {
       box.appendChild(el("p", { cls: "muted", text: "AI 없이 기본 템플릿입니다. 설정에서 AI를 켜면 맞춤 계획이 됩니다." }));
     }
   }
   const brow = el("div", { cls: "addrow" });
+  const drill = plan.blocks.filter(function (b) { return b.taskId && (b.kind === "개념" || b.kind === "유도"); });
+  if (drill.length) {
+    brow.appendChild(bridgeButton("오늘 인출 문제", "retrieval", function () {
+      const pf = loadProfile();
+      return {
+        items: drill.map(function (b) {
+          const g = findGoal(pf, b.goalId);
+          return {
+            course: g ? g.title : "",
+            kind: b.kind,
+            text: String(b.text).replace(/^안 보고 (써보기|유도) — /, ""),
+            missed: b.missed || ""
+          };
+        })
+      };
+    }));
+  }
   if (target === todayStr(new Date())) {
     const fb = el("button", { cls: "mini bd", text: "▶ 실행 모드" });
     fb.addEventListener("click", function () { focusNow(); });
@@ -2168,8 +2478,80 @@ function renderToday() {
     brow.appendChild(el("span", { cls: "muted", text: "🔔 알림 켜짐 (탭이 열려 있을 때)" }));
   }
   if (brow.children.length) box.appendChild(brow);
+  if (bridgeMsg || promptText) box.appendChild(bridgeBox({}));
   box.appendChild(genButton(target, "다시 생성"));
   return box;
+}
+
+// "Gemini로 보내기" 버튼 하나 + 복사가 막혔을 때의 원문 상자
+function bridgeButton(label, kind, ctxFn) {
+  const b = el("button", { cls: "mini bd", text: "✨ " + label });
+  b.title = "앱이 아는 것을 넣어 프롬프트를 만들고 복사합니다. Gemini 앱에 붙여넣으세요.";
+  b.addEventListener("click", function (e) {
+    if (e && e.preventDefault) e.preventDefault();
+    copyPrompt(buildPrompt(kind, ctxFn()));
+  });
+  return b;
+}
+// 복사 결과·원문·붙여넣기 칸. 화면마다 같은 모양으로 붙는다.
+function bridgeBox(opts) {
+  const o = opts || {};
+  const box = el("div", { cls: "bridge" });
+  if (bridgeMsg) box.appendChild(el("div", { cls: "bridgemsg", text: bridgeMsg }));
+  if (promptText) {
+    box.appendChild(el("div", { cls: "muted", text: "자동 복사가 막혔습니다. 아래 전체를 선택해 복사하세요." }));
+    const ta = el("textarea", { cls: "promptbox" });
+    ta.rows = 8;
+    ta.value = promptText;
+    box.appendChild(ta);
+    const close = el("button", { cls: "mini", text: "닫기" });
+    close.addEventListener("click", function () { promptText = ""; render(); });
+    box.appendChild(close);
+  }
+  if (o.paste) {
+    if (!pasteOpen) {
+      const open = el("button", { cls: "mini", text: "📋 Gemini 답을 여기 붙여넣기" });
+      open.addEventListener("click", function () { pasteOpen = true; render(); });
+      box.appendChild(open);
+    } else {
+      const ta = el("textarea", { cls: "promptbox" });
+      ta.rows = 6;
+      ta.placeholder = "## 데이터베이스\n1. 3장 연습문제 1~10번 풀기\n2. …";
+      box.appendChild(ta);
+      const row = el("div", { cls: "addrow" });
+      const take = el("button", { cls: "mini bd", text: "가져오기" });
+      take.addEventListener("click", function () {
+        const n = importCourseTasks(ta.value);
+        bridgeMsg = n ? ("과제 " + n + "개를 넣었습니다.") : "읽을 수 있는 목록이 없습니다. “## 과목” 아래 번호 목록 형식인지 보세요.";
+        if (n) pasteOpen = false;
+        render();
+      });
+      const cancel = el("button", { cls: "mini", text: "취소" });
+      cancel.addEventListener("click", function () { pasteOpen = false; bridgeMsg = ""; render(); });
+      row.appendChild(take); row.appendChild(cancel);
+      box.appendChild(row);
+    }
+  }
+  return box;
+}
+
+// "2026-10-20" 또는 "10/20" 에서 남은 날. 못 읽으면 null (순수)
+function daysUntil(deadline, today) {
+  const t = String(deadline || "").trim();
+  if (!t) return null;
+  const p = String(today).split("-").map(Number);
+  let y, mo, d;
+  let m = t.match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else {
+    m = t.match(/(\d{1,2})[-./월]\s*(\d{1,2})/);
+    if (!m) return null;
+    mo = +m[1]; d = +m[2]; y = p[0];
+    if (mo < p[1] - 6) y += 1;                 // 해를 넘긴 마감
+  }
+  const a = new Date(p[0], p[1] - 1, p[2]), b = new Date(y, mo - 1, d);
+  const diff = Math.round((b - a) / 86400000);
+  return isNaN(diff) ? null : diff;
 }
 
 // 목표 · 과제 — 자기 페이지를 갖는다
@@ -2178,7 +2560,34 @@ function renderGoalsPanel() {
   const box = el("section", { cls: "goals" });
   box.id = "goals";
   box.appendChild(el("h2", { text: "목표 · 과제" }));
-  box.appendChild(el("p", { cls: "what", text: "목표를 적고 “AI로 과제 쪼개기”를 누르면 60분 안에 끝나는 과제로 나눠집니다. 그 과제가 계획의 학습 블록이 됩니다." }));
+  box.appendChild(el("p", { cls: "what", text: "과목을 적고 ✨ 버튼으로 프롬프트를 복사해 Gemini에 붙여넣으세요. 돌아온 목록을 다시 붙여넣으면 과제가 됩니다. 그 과제가 계획의 학습 블록이 됩니다." }));
+
+  const grow2 = el("div", { cls: "addrow" });
+  grow2.appendChild(bridgeButton("과제 쪼개기 프롬프트", "breakdown", function () {
+    const pf = loadProfile();
+    return {
+      traits: (pf.traits || "").trim(),
+      goals: pf.goals.map(function (g) {
+        return { title: g.title, scope: g.scope || "", deadline: g.deadline || "", note: g.note || "" };
+      })
+    };
+  }));
+  grow2.appendChild(bridgeButton("진도 점검 프롬프트", "pace", function () {
+    const pf = loadProfile();
+    const today = todayStr(new Date());
+    return {
+      today: today,
+      goals: pf.goals.map(function (g) {
+        const pr = goalProgress(g);
+        return {
+          title: g.title, scope: g.scope || "", deadline: g.deadline || "",
+          daysLeft: daysUntil(g.deadline, today), done: pr.done, total: pr.total
+        };
+      })
+    };
+  }));
+  box.appendChild(grow2);
+  box.appendChild(bridgeBox({ paste: true }));
   profile.goals.forEach(function (g) {
     const gv = el("div", { cls: "goal" });
     const top = el("div", { cls: "goaltop" });
@@ -2190,6 +2599,13 @@ function renderGoalsPanel() {
       if (gg) { gg.deadline = v; saveProfile(p); }
     });
     top.appendChild(dl);
+    const sc = el("input", { cls: "dl" }); sc.type = "text"; sc.placeholder = "범위(선택)"; sc.value = g.scope || "";
+    sc.setAttribute("aria-label", g.title + " 시험 범위");
+    bindField(sc, "sc-" + g.id, function (v) {
+      const p2 = loadProfile(); const gg = findGoal(p2, g.id);
+      if (gg) { gg.scope = v; saveProfile(p2); }
+    });
+    top.appendChild(sc);
     const del = el("button", { cls: "mini", text: "삭제" });
     del.addEventListener("click", function () {
       const p = loadProfile();
@@ -2818,7 +3234,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isQuotaError, buildPrompt, parseCourseTasks, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

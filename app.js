@@ -1162,13 +1162,14 @@ function dueReviewCandidates(date, profile, limit) {
   });
 }
 // 복습 블록을 끝냈다. 한 줄이 적혀 있으면 틀린 것으로 본다.
-function settleReview(reviewId, note, today) {
+// correct 를 넘기면 그대로 쓴다. 안 넘기면 한 줄이 비었는지로 판단한다.
+function settleReview(reviewId, note, today, correct) {
   const all = loadReviews();
   const i = all.map(function (r) { return r.id; }).indexOf(reviewId);
   if (i < 0) return null;
-  const correct = !String(note || "").trim();
+  if (correct == null) correct = !String(note || "").trim();
   const next = scheduleReview(all[i], correct, today);
-  if (!correct) next.missed = String(note).slice(0, 80);
+  if (!correct && String(note || "").trim()) next.missed = String(note).slice(0, 80);
   all[i] = next;
   saveReviews(all);
   return next;
@@ -1577,7 +1578,10 @@ function applyEdit(date, mutate) {
 
 // 블록을 끝낸다. 한 줄이 적혀 있으면 "틀렸다"로 읽어 복습 큐에 넣는다.
 // 복습 블록이면 상자를 올리거나(비었으면) 1로 되돌린다(적혀 있으면).
-function finishBlock(date, block) {
+// 인출로 확인할 수 있는 유형인가. 코드는 백지가 안 통한다.
+function isRecallable(kind) { return kind === "개념" || kind === "유도"; }
+
+function finishBlock(date, block, correct) {
   const note = (askDraft[block.id] || "").trim();
   // 착수 시각이 있어야 실제 시간을 안다. 없으면 기록하지 않는다(지어내지 않는다).
   if (block.startedAt) {
@@ -1586,11 +1590,13 @@ function finishBlock(date, block) {
   }
   delete focusBreaks[block.id];
   if (block.reviewId) {
-    settleReview(block.reviewId, note, date);
-  } else if (note) {
+    settleReview(block.reviewId, note, date, correct);
+  } else {
     const clean = String(block.text || "").replace(/^(안 보고 (써보기|유도) — |첫 1개만 · )/, "");
-    addReview(block.goalId, block.kind, clean, date, note);
-    addStuck(block.goalId, note);
+    // 인출로 확인할 수 있는 과제는 한 줄을 안 적어도 큐에 넣는다.
+    // 안 그러면 타이핑을 한 번도 안 한 사람에게는 복습이 영영 안 쌓인다.
+    if (note || isRecallable(block.kind)) addReview(block.goalId, block.kind, clean, date, note);
+    if (note) addStuck(block.goalId, note);
   }
   delete askDraft[block.id];
   setBlockDone(date, block.id, true, new Date());
@@ -2145,11 +2151,27 @@ function renderFocus() {
   } else {
     row.appendChild(el("span", { cls: "muted", text: "시작 " + localHHMM(b.startedAt) + (b.onTime ? " · 정시" : "") }));
   }
+  if (b.reviewId && !b.done) {
+    // 인출 확인. 답을 본 뒤 스스로 판정한다 — 이게 상자를 움직이는 유일한 신호다.
+    const rrow = el("div", { cls: "addrow recallrow" });
+    const yes = el("button", { cls: "mini bd", text: "✓ 기억났다" });
+    yes.title = "다음 차례가 멀어집니다";
+    const no = el("button", { cls: "mini", text: "✗ 안 나왔다" });
+    no.title = "내일 다시 나옵니다";
+    if (flocked) { yes.disabled = true; no.disabled = true; yes.title = lockReason(fwin); }
+    else {
+      yes.addEventListener("click", function () { finishBlock(date, b, true); render(); });
+      no.addEventListener("click", function () { finishBlock(date, b, false); render(); });
+    }
+    rrow.appendChild(yes);
+    rrow.appendChild(no);
+    box.appendChild(rrow);
+  }
   if (!b.done) {
     const db = el("button", { cls: "mini", text: "완료" });
     if (flocked) { db.disabled = true; db.title = lockReason(fwin); }
     else db.addEventListener("click", function () { finishBlock(date, b); render(); });
-    row.appendChild(db);
+    if (!b.reviewId) row.appendChild(db);
   } else {
     row.appendChild(el("span", { cls: "muted", text: "완료됨" }));
   }
@@ -3636,7 +3658,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

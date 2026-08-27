@@ -224,6 +224,18 @@ function activeDate(now) {
   return now.getHours() >= 21 ? addDays(todayStr(now), 1) : todayStr(now);
 }
 
+// 21시가 넘으면 activeDate가 내일을 가리킨다. 그때 오늘 계획이 화면에서 통째로 사라졌고
+// 돌아갈 길이 없었다 — 하루를 되짚는 시간이 바로 그때라 여기가 막히면 안 된다.
+// viewOverride가 있으면 그 날을 본다. 오늘·내일 말고는 받지 않아서 지난 날짜에 갇히지 않는다.
+let viewOverride = null;
+function viewDate(now) {
+  now = now || new Date();
+  const t = todayStr(now);
+  if (viewOverride === t || viewOverride === addDays(t, 1)) return viewOverride;
+  viewOverride = null;
+  return activeDate(now);
+}
+
 // ---- visits / streak (pure) ----
 function recordVisit(visits, today) {
   if (visits.indexOf(today) === -1) return visits.concat([today]);
@@ -2108,7 +2120,7 @@ function renderTopbar() {
     bar.appendChild(back);
   }
   const now = new Date();
-  const target = activeDate(now);
+  const target = viewDate(now);
   const streak = computeStreak(loadVisits(), todayStr(now));
   if (streak > 0) bar.appendChild(el("span", { cls: "tstreak", text: "🔥 " + streak + "일" }));
   bar.appendChild(el("span", { cls: "tdate", text: (target !== todayStr(now) ? "내일 · " : "") + dateWithWeekday(target) }));
@@ -2200,6 +2212,11 @@ function render() {
       root.appendChild(renderFooter());
       root.appendChild(renderGuide());
     } else {
+      // 처음이면 앱이 뭔지 먼저 말하고, 할 수 있는 것도 여기로 올린다(평소엔 설정 탭에만 있다)
+      const intro = renderIntro();
+      if (intro) { root.appendChild(intro); root.appendChild(renderGuide()); }
+      const sw = renderDaySwitch();
+      if (sw) root.appendChild(sw);
       const nb = renderNowbar();
       if (nb) root.appendChild(nb);
       root.appendChild(renderToday());
@@ -2270,7 +2287,7 @@ function renderFocus() {
   const fs = firstStep(b);
   if (fs) {
     const f = el("div", { cls: "ffirst" });
-    f.appendChild(el("span", { cls: "flabel", text: "첫 동작" }));
+    f.appendChild(el("span", { cls: "ftag", text: "첫 동작" }));
     f.appendChild(el("span", { cls: "ftext", text: fs }));
     box.appendChild(f);
   }
@@ -2317,7 +2334,7 @@ function renderFocus() {
     const item = loadReviews().filter(function (r) { return r.id === b.reviewId; })[0];
     if (item && item.q) {
       const qb = el("div", { cls: "recallq" });
-      qb.appendChild(el("span", { cls: "flabel", text: "안 보고 답하기" }));
+      qb.appendChild(el("span", { cls: "ftag", text: "안 보고 답하기" }));
       qb.appendChild(el("span", { cls: "qtextline", text: item.q }));
       box.appendChild(qb);
     }
@@ -2414,7 +2431,7 @@ function renderFocus() {
 // 지금 뭐 할 차례. 줄 전체가 실행 모드 진입 버튼이다.
 function renderNowbar() {
   const now = new Date();
-  if (activeDate(now) !== todayStr(now)) return null;
+  if (viewDate(now) !== todayStr(now)) return null;
   const plan = loadPlans()[todayStr(now)];
   if (!plan) return null;
   const cb = currentBlock(plan.blocks.filter(function (x) { return !x.done; }), now);
@@ -2431,7 +2448,7 @@ function renderNowbar() {
 // 계획을 만드는 도구 — 배터리 · 특별 일정 · 생성 버튼. 계획 아래에 둔다(계획이 먼저 보여야 한다).
 function renderPlanTools() {
   const now = new Date();
-  const target = activeDate(now);
+  const target = viewDate(now);
   const isTomorrow = target !== todayStr(now);
   const plan = loadPlans()[target];
   const box = el("section", { cls: "tools" });
@@ -2471,6 +2488,41 @@ function renderPlanTools() {
 }
 
 // 이 앱이 뭘 할 수 있는지 — 이름만 보고 바로 누를 수 있게
+// 처음 여는 사람은 이게 뭘 하는 물건인지 모른다. 화면 어디에도 안 적혀 있었다.
+// 계획도 목표도 없을 때만 한 줄로 말하고, 쓰기 시작하면 사라진다 — 매일 보는 사람에게 설명은 소음이다.
+function isFreshStart() {
+  const now = new Date();
+  const plans = loadPlans();
+  if (plans[todayStr(now)] || plans[activeDate(now)]) return false;
+  return !((loadProfile().goals || []).length);
+}
+
+// 밤에만 나온다. 낮에는 볼 날이 하나뿐이라 고를 게 없다(원칙 1: 없어도 되는 결정을 만들지 않는다).
+function renderDaySwitch() {
+  const now = new Date();
+  const t = todayStr(now);
+  if (activeDate(now) === t) return null;
+  const cur = viewDate(now);
+  const box = el("div", { cls: "dayswitch" });
+  box.setAttribute("aria-label", "볼 날짜");
+  [{ d: t, label: "오늘" }, { d: addDays(t, 1), label: "내일" }].forEach(function (o) {
+    const on = cur === o.d;
+    const b = el("button", { cls: "dchip" + (on ? " on" : ""), text: o.label + " " + o.d.slice(5).replace("-", "/") });
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.addEventListener("click", function () { viewOverride = o.d; render(); });
+    box.appendChild(b);
+  });
+  return box;
+}
+
+function renderIntro() {
+  if (!isFreshStart()) return null;
+  const box = el("section", { cls: "intro" });
+  box.appendChild(el("p", { cls: "tag", text: "하루 계획을 AI가 대신 짭니다" }));
+  box.appendChild(el("p", { cls: "lede", text: "고정 일정과 목표를 한 번 적어두면, 버튼 하나로 오늘 09~24시가 시간대별로 채워집니다. 계획은 짜지 않고, 정해진 것을 제때 시작했는지만 기록합니다." }));
+  return box;
+}
+
 function renderGuide() {
   const now = new Date();
   const box = el("section", { cls: "guidebox" });
@@ -2666,13 +2718,13 @@ function renderFooter() {
 // 식단 카드가 뜰 조건 — 기능 버튼이 죽은 버튼이 되지 않게 미리 안다
 function mealsAvailable() {
   const now = new Date();
-  const plan = loadPlans()[activeDate(now)];
+  const plan = loadPlans()[viewDate(now)];
   const profile = loadProfile();
   return !!((plan && (plan.meals || plan.shopping)) || bodyStats(profile, now) || (profile.fridge || "").trim());
 }
 function renderMeals() {
   const now = new Date();
-  const target = activeDate(now);
+  const target = viewDate(now);
   const plan = loadPlans()[target];
   const m = plan && plan.meals;
   const shopping = plan && plan.shopping;
@@ -2726,7 +2778,7 @@ function renderProgress() {
   box.appendChild(el("p", { cls: "what", text: "목표마다 과제가 몇 개 남았는지. 계획의 학습 블록을 체크하면 여기가 찹니다." }));
   const profile = loadProfile();
   if (!profile.goals.length) {
-    box.appendChild(el("p", { cls: "muted", text: "아래 설정에서 목표를 추가하세요." }));
+    box.appendChild(el("p", { cls: "muted", text: "바로 아래 “목표”에서 과목이나 목표를 추가하세요." }));
     return box;
   }
   profile.goals.forEach(function (g) {
@@ -2783,7 +2835,7 @@ function renderToday() {
   const box = el("section", { cls: "today" });
   box.setAttribute("aria-label", "오늘 계획");
   const now = new Date();
-  const target = activeDate(now);
+  const target = viewDate(now);
   const isTomorrow = target !== todayStr(now);
   const plan = loadPlans()[target];
 
@@ -2872,11 +2924,18 @@ function renderToday() {
     const cb = el("input");
     cb.type = "checkbox";
     cb.checked = !!bk.done;
-    if (locked) { cb.disabled = true; cb.title = lockReason(win); }
+    if (locked) {
+      cb.disabled = true;
+      // 비활성 input의 title은 안 뜨는 브라우저가 많고 키보드로도 못 닿는다.
+      // 이유를 행 전체에 건다 — 어디에 올려도 뜨고, 스크린리더도 읽는다.
+      row.title = lockReason(win);
+      row.setAttribute("aria-label", bk.time + " " + bk.text + " — " + lockReason(win));
+    }
     cb.addEventListener("change", function () { setBlockDone(target, bk.id, cb.checked, new Date()); render(); });
     row.appendChild(cb);
     row.appendChild(el("span", { cls: "time", text: bk.time }));
-    if (bk.core) { const dotm = el("span", { cls: "coremark", text: "●" }); dotm.setAttribute("aria-hidden", "true"); row.appendChild(dotm); }
+    // ●은 그날의 성패를 정의하는 표시다. aria-hidden으로 두면 스크린리더에 아예 안 보인다.
+    if (bk.core) { const dotm = el("span", { cls: "coremark", text: "●" }); dotm.setAttribute("role", "img"); dotm.setAttribute("aria-label", "핵심"); row.appendChild(dotm); }
     row.appendChild(el("span", { cls: "txt", text: bk.text }));
     if (bk.kind) row.appendChild(el("span", { cls: "kindchip k" + KINDS.indexOf(bk.kind), text: bk.kind }));
     if (bk.place) row.appendChild(el("span", { cls: "place", text: bk.place }));
@@ -3053,7 +3112,8 @@ function renderToday() {
   if (brow.children.length) box.appendChild(brow);
   if (drill.length) box.appendChild(bridgeBox({ questions: true }));
   else if (bridgeMsg || promptText) box.appendChild(bridgeBox({}));
-  box.appendChild(genButton(target, "다시 생성"));
+  // 생성 버튼은 renderPlanTools 하나만 가진다. 그 카드가 배터리·특별 일정 입력도 함께 갖고 있어서,
+  // 여기 또 두면 입력을 채우기 전에 누르게 된다.
   return box;
 }
 
@@ -3886,7 +3946,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, studyStats, renderMeasure, EXAM_MARGIN, parseExams, nextExam, effectiveDeadline, DEFAULT_EXAMS, parseQuestions, attachQuestions, isLeech, leechItems, reviewQuota, LEECH_AT, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, studyStats, renderMeasure, EXAM_MARGIN, parseExams, nextExam, effectiveDeadline, DEFAULT_EXAMS, parseQuestions, attachQuestions, isLeech, leechItems, reviewQuota, LEECH_AT, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderIntro, isFreshStart, viewDate, renderDaySwitch, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 

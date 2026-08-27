@@ -75,7 +75,7 @@ html, body {
 }
 
 /* cards */
-.prog, .today, .settings, .meals, .note, .flow, .footer, .tools, .natal, .fortune, .goals {
+.prog, .today, .settings, .meals, .note, .flow, .footer, .tools, .natal, .fortune, .goals, .intro {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -92,10 +92,9 @@ h2 {
 .muted { color: var(--muted); font-size: 13px; line-height: 1.5; }
 .err { color: var(--danger); font-size: 13px; line-height: 1.5; word-break: break-all; margin: 10px 0 0; }
 
-/* hero / landing */
-.brand { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; margin: 0; }
-.tag { font-size: 15px; font-weight: 600; color: var(--accent); margin: 4px 0 12px; }
-.lede { font-size: 14px; line-height: 1.65; color: var(--muted); margin: 0 0 18px; }
+/* 첫 방문 안내(renderIntro). 계획이 하나라도 생기면 사라지므로 여백은 아래쪽만 없앤다. */
+.tag { font-size: 17px; font-weight: 700; color: var(--ink); margin: 0 0 8px; letter-spacing: -0.01em; }
+.lede { font-size: 14px; line-height: 1.65; color: var(--muted); margin: 0; }
 
 /* now / next bar */
 .nowbar {
@@ -315,8 +314,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 .coremark { flex: none; font-size: 9px; color: var(--accent); }
 
-/* 흐름 카드 — 짧은(기록) / 중간(세운) / 긴(대운) */
-.flow { }
+/* 흐름 카드 — 짧은(기록) / 중간(세운) / 긴(대운). 카드 껍데기는 위 공통 규칙이 준다 */
 .layer { padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
 .llabel { font-size: 11px; font-weight: 700; color: var(--muted); margin-bottom: 8px; letter-spacing: 0.09em; text-transform: uppercase; }
 .bignum { font-size: 20px; font-weight: 800; margin-bottom: 6px; font-variant-numeric: tabular-nums; }
@@ -386,7 +384,9 @@ button:disabled { opacity: 0.5; cursor: default; }
   display: block; background: var(--accent-soft); border-radius: 10px;
   padding: 14px 16px; margin: 0 0 16px;
 }
-.flabel { display: block; font-size: 10px; font-weight: 800; letter-spacing: 0.12em; color: var(--accent); margin-bottom: 6px; }
+/* 실행 모드 눈썹 라벨. 폼 라벨(.flabel, 278행)과 이름이 겹치면 뒤가 이겨서
+   설정 폼 전체가 10px 파란 글씨가 된다 — 실제로 한 번 그랬다. 이름을 분리해 둔다. */
+.ftag { display: block; font-size: 10px; font-weight: 800; letter-spacing: 0.12em; color: var(--accent); margin-bottom: 6px; }
 .ftext { display: block; font-size: 18px; line-height: 1.45; font-weight: 700; color: var(--ink); }
 .fbar { height: 6px; border-radius: 3px; background: var(--neutral-soft); overflow: hidden; margin: 0 0 6px; }
 .fbarfill { height: 100%; background: var(--accent); }
@@ -656,3 +656,11 @@ section.settings, section.goals {
 .mval { font-size: 22px; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; line-height: 1.15; }
 .mlab { font-size: 12px; font-weight: 600; color: var(--ink); }
 .mnote { font-size: 11px; color: var(--dim); }
+
+/* 오늘·내일 전환 — 21시 이후에만 나온다. 그전엔 볼 날이 하나뿐이라 고를 게 없다 */
+.dayswitch { display: flex; gap: 8px; margin: 0 0 14px; }
+.dchip {
+  font-size: 13px; font-weight: 600; padding: 10px 16px; min-height: 44px;
+  border-radius: 4px; letter-spacing: 0.02em; font-variant-numeric: tabular-nums;
+}
+.dchip.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }

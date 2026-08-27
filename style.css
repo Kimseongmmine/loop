@@ -641,3 +641,10 @@ section.settings, section.goals {
 /* 인출 확인 — 두 갈래만 */
 .recallrow { margin-top: 14px; }
 .recallrow .mini { flex: 1 1 0; }
+
+/* 인출 문제 — 답을 보기 전에 이것만 보인다 */
+.recallq {
+  display: block; background: var(--accent-soft); border-radius: 10px;
+  padding: 14px 16px; margin: 0 0 12px;
+}
+.qtextline { display: block; font-size: 17px; line-height: 1.5; font-weight: 700; color: var(--ink); margin-top: 6px; }

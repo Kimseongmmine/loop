@@ -1144,6 +1144,20 @@ function addReview(goalId, kind, text, today, note) {
   saveReviews(all);
   return item;
 }
+// 시험이 가까울수록 새 진도보다 굳히기다. 하루에 넣을 복습 개수를 늘린다. (순수하지 않음)
+const REVIEW_QUOTA = { far: 2, near: 4, imminent: 5 };
+function reviewQuota(profile, date) {
+  let min = null;
+  ((profile && profile.goals) || []).forEach(function (g) {
+    const d = daysUntil(g.deadline, date);
+    if (d != null && d >= 0 && (min == null || d < min)) min = d;
+  });
+  if (min == null) return REVIEW_QUOTA.far;
+  if (min <= 3) return REVIEW_QUOTA.imminent;
+  if (min <= 7) return REVIEW_QUOTA.near;
+  return REVIEW_QUOTA.far;
+}
+
 // 오늘까지 차례가 된 것. 오래 밀린 것부터. (순수하지 않음 — 저장소를 읽는다)
 function dueReviews(date, limit) {
   return loadReviews()
@@ -1170,10 +1184,44 @@ function settleReview(reviewId, note, today, correct) {
   if (correct == null) correct = !String(note || "").trim();
   const next = scheduleReview(all[i], correct, today);
   if (!correct && String(note || "").trim()) next.missed = String(note).slice(0, 80);
+  // 여섯 번을 봤는데도 1번 상자면 그대로 두면 매일 나온다. 열흘 물리고 쪼개라고 표시한다.
+  if (isLeech(next)) { next.due = addDays(today, LEECH_REST); next.leech = true; }
   all[i] = next;
   saveReviews(all);
   return next;
 }
+// Gemini가 만든 인출 문제를 되받는다. 번호 목록 또는 "Q:" 줄. 답(--- 아래)은 버린다. (순수)
+function parseQuestions(text) {
+  const body = String(text || "").split(/^\s*-{3,}\s*$/m)[0];   // 답을 몰아둔 구획 앞까지
+  const out = [];
+  body.split(/\r?\n/).forEach(function (line) {
+    let m = line.match(/^\s*(?:\d{1,2}[.)]|[-*•]|Q\s*[:.])\s*(.+?)\s*$/i);
+    if (!m) return;
+    const t = m[1].replace(/\*\*/g, "").trim();
+    if (t.length > 4) out.push(t.slice(0, 140));
+  });
+  return out;
+}
+// 오늘 차례가 된 항목에 순서대로 붙인다. 개수가 안 맞으면 있는 만큼만.
+function attachQuestions(date, list) {
+  const qs = Array.isArray(list) ? list : parseQuestions(list);
+  if (!qs.length) return 0;
+  const all = loadReviews();
+  const due = all.filter(function (r) { return r.due && r.due <= date; })
+    .sort(function (a, b) { return a.due < b.due ? -1 : (a.due > b.due ? 1 : 0); });
+  let n = 0;
+  due.forEach(function (r, i) { if (qs[i]) { r.q = qs[i]; n++; } });
+  if (n) saveReviews(all);
+  return n;
+}
+
+// ---- 여러 번 틀린 항목 (leech) ----
+// 계속 1번 상자로 떨어지는 항목이 큐를 잠식한다. 표시해서 잠시 물리고, 쪼개라고 말해준다.
+const LEECH_AT = 6;
+const LEECH_REST = 10;   // 물리는 날 수
+function isLeech(item) { return !!item && (item.seen || 0) >= LEECH_AT && (item.box || 1) <= 1; }
+function leechItems() { return loadReviews().filter(isLeech); }
+
 // 유형마다 묻는 말이 다르다. 한 줄을 넘지 않는다 — 입력 부담은 이탈 원인이다.
 const ASK_LABEL = {
   구현: "막혔던 지점?",
@@ -1304,7 +1352,8 @@ function buildPrompt(kind, ctx) {
     lines.push("[오늘 확인할 것]");
     (c.items || []).forEach(function (it) {
       lines.push("- (" + (it.course || "과목") + " · " + (it.kind || "개념") + ") " + it.text +
-        (it.missed ? ("  — 지난번 틀린 곳: " + it.missed) : ""));
+        (it.missed ? ("  — 지난번 틀린 곳: " + it.missed) : "") +
+        (it.leech ? "  — 여러 번 놓쳤다. 더 작은 조각으로 나눠서 물어봐라" : ""));
     });
   } else if (kind === "stuck") {
     lines.push("[상황]");
@@ -1805,7 +1854,7 @@ async function generatePlan(targetDate, opts) {
     // 2) build the hourly plan (AI, else template)
     // 오늘 차례가 된 복습을 먼저 놓고, 남은 자리를 새 과제로 채운다.
     const prof0 = loadProfile();
-    const revs = dueReviewCandidates(targetDate, prof0, 2);
+    const revs = dueReviewCandidates(targetDate, prof0, reviewQuota(prof0, targetDate));
     // 하루 세 과목까지만. 다섯 과목을 돌리면 하루에 다섯 번 문맥이 바뀐다.
     const today3 = { goals: dailyCourses(prof0, targetDate, DAILY_COURSES) };
     const candidates = revs.concat(nextPendingTasks(today3, Math.max(3, 6 - revs.length)));
@@ -2150,6 +2199,17 @@ function renderFocus() {
     row.appendChild(sb);
   } else {
     row.appendChild(el("span", { cls: "muted", text: "시작 " + localHHMM(b.startedAt) + (b.onTime ? " · 정시" : "") }));
+  }
+  if (b.reviewId) {
+    const item = loadReviews().filter(function (r) { return r.id === b.reviewId; })[0];
+    if (item && item.q) {
+      const qb = el("div", { cls: "recallq" });
+      qb.appendChild(el("span", { cls: "flabel", text: "안 보고 답하기" }));
+      qb.appendChild(el("span", { cls: "qtextline", text: item.q }));
+      box.appendChild(qb);
+    }
+    if (item && item.missed) box.appendChild(el("div", { cls: "muted", text: "지난번 막힌 곳 · " + item.missed }));
+    if (item && item.leech) box.appendChild(el("div", { cls: "muted", text: "여러 번 놓친 항목입니다. ✨ 로 더 잘게 쪼개보세요." }));
   }
   if (b.reviewId && !b.done) {
     // 인출 확인. 답을 본 뒤 스스로 판정한다 — 이게 상자를 움직이는 유일한 신호다.
@@ -2854,7 +2914,8 @@ function renderToday() {
             course: g ? g.title : "",
             kind: b.kind,
             text: String(b.text).replace(/^(복습 — |안 보고 (써보기|유도) — )/, ""),
-            missed: (r && r.missed) || ""
+            missed: (r && r.missed) || "",
+            leech: !!(r && r.leech)
           };
         })
       };
@@ -2877,7 +2938,8 @@ function renderToday() {
     brow.appendChild(el("span", { cls: "muted", text: "🔔 알림 켜짐 (탭이 열려 있을 때)" }));
   }
   if (brow.children.length) box.appendChild(brow);
-  if (bridgeMsg || promptText) box.appendChild(bridgeBox({}));
+  if (drill.length) box.appendChild(bridgeBox({ questions: true }));
+  else if (bridgeMsg || promptText) box.appendChild(bridgeBox({}));
   box.appendChild(genButton(target, "다시 생성"));
   return box;
 }
@@ -2906,6 +2968,31 @@ function bridgeBox(opts) {
     const close = el("button", { cls: "mini", text: "닫기" });
     close.addEventListener("click", function () { promptText = ""; render(); });
     box.appendChild(close);
+  }
+  // Gemini가 만든 인출 문제를 오늘 복습에 붙인다
+  if (o.questions) {
+    if (!pasteOpen) {
+      const open = el("button", { cls: "mini", text: "📋 만들어진 문제를 여기 붙여넣기" });
+      open.addEventListener("click", function () { pasteOpen = true; render(); });
+      box.appendChild(open);
+    } else {
+      const ta = el("textarea", { cls: "promptbox" });
+      ta.rows = 6;
+      ta.placeholder = "1. 3NF의 조건을 쓰고 2NF와 뭐가 다른지…";
+      box.appendChild(ta);
+      const row = el("div", { cls: "addrow" });
+      const take = el("button", { cls: "mini bd", text: "오늘 복습에 붙이기" });
+      take.addEventListener("click", function () {
+        const n = attachQuestions(todayStr(new Date()), ta.value);
+        bridgeMsg = n ? ("문제 " + n + "개를 오늘 복습에 붙였습니다.") : "읽을 수 있는 문제가 없습니다. 번호 목록인지 보세요.";
+        if (n) pasteOpen = false;
+        render();
+      });
+      const cancel = el("button", { cls: "mini", text: "취소" });
+      cancel.addEventListener("click", function () { pasteOpen = false; bridgeMsg = ""; render(); });
+      row.appendChild(take); row.appendChild(cancel);
+      box.appendChild(row);
+    }
   }
   if (o.paste) {
     if (!pasteOpen) {
@@ -3658,7 +3745,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeStreak, visitGrid, recordVisit, goalProgress, nextPendingTasks,
     findGoal, extractJSON, todayStr, dateStr, addDays, pad2, activeDate,
     templatePlan, mapAIBlocks, coreStatus, generatePlan, profileContext, loadProfile,
-    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
+    parseTaskList, breakdownGoalNow, parseTextSchedule, repairTruncatedJSON, weekdayOf, dateWithWeekday, normalizeMeals, normalizeShopping, bodyStats, mealContext, quoteFor, currentCycle, currentAge, yearPillar, yearTone, yearFlow, gzTone, solarMonth, monthPillar, monthFlow, recentStats, stalledTask, renderFlow, isOnTime, startWindow, lockReason, blockStartMinutes, blockEndMinutes, setBlockDone, currentBlock, daySummary, replanFromNow, keepableBlocks, dayPillar, julianDay, dayFortune, hourBranch, commuteBetween, isFillerBlock, isMicroBlock, splitDay, spanText, isRecallable, parseQuestions, attachQuestions, isLeech, leechItems, reviewQuota, LEECH_AT, parseCourses, DEFAULT_COURSES, loadSessions, saveSessions, addSession, sessionStats, sessionLine, dailyCourses, courseScore, lastTouched, scopeUnits, examPace, paceLine, DAILY_COURSES, loadReviews, saveReviews, scheduleReview, addReview, dueReviews, dueReviewCandidates, settleReview, askLabel, finishBlock, REVIEW_STEPS, isQuotaError, buildPrompt, parseCourseTasks, pastRecord, importCourseTasks, daysUntil, loadStuck, addStuck, PROMPTS, taskKind, courseKind, blockMinutesFor, retrievalText, KINDS, setEditing, editableBlocks, swapSlots, shiftBlock, swapTask, dropBlock, swapCandidates, applyEdit, renderFortune, renderNatal, natalChart, hourPillar, renderGoalsPanel, renderGuide, renderNowbar, renderPlanTools, currentTab, goTab, mealsAvailable, firstStep, setBlockStarted, exportPayload, applyImport, openFocus, closeFocus, renderFocus, placeRules, fillPlaces, insertCommutes, minToClock, parseEvents, mergeEventBlocks, getEvent, setEvent, render
   };
 }
 
